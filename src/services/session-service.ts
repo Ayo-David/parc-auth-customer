@@ -376,7 +376,11 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
         typ: "JWT",
       })
       .setIssuer(this.issuer)
-      .setAudience(session.audience)
+      .setAudience(
+        session.subject_type === "ADMINISTRATOR"
+          ? [session.audience, "tenant-admin"]
+          : session.audience,
+      )
       .setSubject(session.subject_id)
       .setJti(jti)
       .setIssuedAt()
