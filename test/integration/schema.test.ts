@@ -36,13 +36,14 @@ integrationTest("enforces approved Auth schema invariants", async () => {
     const required = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public' AND table_name IN
-         ('kyc_tier_versions', 'identity_verification_evidence', 'authentication_challenges', 'notification_delivery_attempts')`,
+         ('kyc_tier_versions', 'identity_verification_evidence', 'authentication_challenges', 'notification_delivery_attempts', 'transaction_authorizations')`,
     );
     expect(required.rows.map(({ table_name }) => table_name).sort()).toEqual([
       "authentication_challenges",
       "identity_verification_evidence",
       "kyc_tier_versions",
       "notification_delivery_attempts",
+      "transaction_authorizations",
     ]);
 
     const onboardingColumns = await pool.query<{

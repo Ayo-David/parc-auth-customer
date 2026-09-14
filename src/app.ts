@@ -25,6 +25,10 @@ import type { PasskeyService } from "./services/passkey-service.js";
 import { createPasskeyRouter } from "./http/passkey-router.js";
 import type { KycService } from "./services/kyc-service.js";
 import { createKycRouter } from "./http/kyc-router.js";
+import { createTransactionAuthorizationRouter } from "./http/transaction-authorization-router.js";
+import type { TransactionAuthorizationService } from "./services/transaction-authorization-service.js";
+import type { CustomerExperienceService } from "./services/customer-experience-service.js";
+import { createCustomerExperienceRouter } from "./http/customer-experience-router.js";
 
 export interface AppDependencies {
   config: AppConfig;
@@ -39,6 +43,9 @@ export interface AppDependencies {
   customerMfaService?: CustomerMfaService;
   passkeyService?: PasskeyService;
   kycService?: KycService;
+  transactionAuthorizationService?: TransactionAuthorizationService;
+  customerExperienceService?: CustomerExperienceService;
+  jwks?: { keys: object[] };
 }
 
 export function createApp({
@@ -54,6 +61,9 @@ export function createApp({
   customerMfaService,
   passkeyService,
   kycService,
+  transactionAuthorizationService,
+  customerExperienceService,
+  jwks,
 }: AppDependencies): Express {
   const app = express();
   app.disable("x-powered-by");
@@ -92,6 +102,12 @@ export function createApp({
       next(error);
     }
   });
+
+  if (jwks)
+    app.get("/.well-known/jwks.json", (_request, response) => {
+      response.setHeader("cache-control", "public, max-age=300");
+      response.status(200).json(jwks);
+    });
 
   if (customerService && accessTokenVerifier)
     app.use(
@@ -135,6 +151,21 @@ export function createApp({
   if (kycService && accessTokenVerifier)
     app.use(
       createKycRouter(kycService, customerAuthentication(accessTokenVerifier)),
+    );
+  if (transactionAuthorizationService && accessTokenVerifier)
+    app.use(
+      createTransactionAuthorizationRouter(
+        transactionAuthorizationService,
+        customerAuthentication(accessTokenVerifier),
+        config.INTERNAL_SERVICE_TOKEN,
+      ),
+    );
+  if (customerExperienceService && accessTokenVerifier)
+    app.use(
+      createCustomerExperienceRouter(
+        customerExperienceService,
+        customerAuthentication(accessTokenVerifier),
+      ),
     );
 
   app.use((_request, response) => {

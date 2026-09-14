@@ -20,7 +20,7 @@ import {
   RedisOtpSecretStore,
 } from "./security/otp-secret-store.js";
 import { OtpService } from "./services/otp-service.js";
-import { createJwtKeyRing } from "./security/jwt-key-ring.js";
+import { createJwtKeyRing, publicJwks } from "./security/jwt-key-ring.js";
 import { SessionService } from "./services/session-service.js";
 import { AdministratorAuthenticationService } from "./services/administrator-authentication-service.js";
 import { CustomerMfaService } from "./services/customer-mfa-service.js";
@@ -36,6 +36,9 @@ import { FcmPushProvider } from "./providers/fcm-push-provider.js";
 import { StaticNotificationProviderRegistry } from "./providers/notification-provider.js";
 import { NotificationWorkerService } from "./services/notification-worker-service.js";
 import { NotificationRabbitWorker } from "./messaging/notification-rabbit-worker.js";
+import { TransactionAuthorizationService } from "./services/transaction-authorization-service.js";
+import { ApiError } from "./http/api-error.js";
+import { CustomerExperienceService } from "./services/customer-experience-service.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
@@ -151,6 +154,35 @@ const notificationWorker = config.NOTIFICATION_WORKER_ENABLED
     )
   : undefined;
 await notificationWorker?.start();
+const authenticationService = new AuthenticationService(
+  database,
+  rateLimiter,
+  authResultIssuer,
+  config.CHALLENGE_HASH_SECRET,
+  customerMfaService,
+);
+const transactionAuthorizationService = new TransactionAuthorizationService(
+  database,
+  {
+    async verify(input) {
+      if (input.method === "transaction_pin" && input.pin) {
+        await authenticationService.verifyPin(
+          input.tenantId,
+          input.customerId,
+          input.idempotencyKey,
+          input.pin,
+        );
+        return;
+      }
+      throw new ApiError(
+        501,
+        "BIOMETRIC_TRANSACTION_AUTHORIZATION_UNAVAILABLE",
+        "Biometric transaction authorization is not configured",
+      );
+    },
+  },
+  config.TOKEN_HASH_SECRET,
+);
 const app = createApp({
   config,
   logger,
@@ -173,13 +205,7 @@ const app = createApp({
     config.IDEMPOTENCY_HASH_SECRET,
   ),
   accessTokenVerifier: sessionService,
-  authenticationService: new AuthenticationService(
-    database,
-    rateLimiter,
-    authResultIssuer,
-    config.CHALLENGE_HASH_SECRET,
-    customerMfaService,
-  ),
+  authenticationService,
   otpService: new OtpService(
     database,
     rateLimiter,
@@ -191,6 +217,9 @@ const app = createApp({
   customerMfaService,
   passkeyService,
   kycService,
+  transactionAuthorizationService,
+  customerExperienceService: new CustomerExperienceService(database),
+  jwks: await publicJwks(jwtKeys),
   administratorAuthenticationService: new AdministratorAuthenticationService(
     database,
     tenantAdmin,
