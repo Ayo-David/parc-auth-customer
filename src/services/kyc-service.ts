@@ -18,7 +18,7 @@ import type {
 
 export interface KycVerificationView {
   id: string;
-  identity_type: KycIdentityType;
+  identity_type: KycIdentityType | "BIOMETRIC";
   masked_identity: string;
   provider: "VERIFYME";
   status: "PENDING" | "VERIFIED" | "FAILED" | "MANUAL_REVIEW";
@@ -210,6 +210,124 @@ export class KycService {
           tenantId: input.tenantId,
           key: input.idempotencyKey,
           operation: "kyc.identity.verify",
+          responseCode: 202,
+          responseBody: response,
+        });
+        return response;
+      },
+    );
+  }
+
+  public async startBiometric(
+    input: StartKycVerificationInput & { livenessReference: string },
+  ): Promise<KycVerificationView> {
+    const provider = await this.providers.resolve(input.tenantId);
+    const verificationId = randomUUID();
+    const maskedIdentity = maskIdentity(input.identityValue);
+    const identifierHash = createHmac(
+      "sha256",
+      this.evidenceKeys.identifierHashSecret,
+    )
+      .update(`${input.tenantId}:${input.identityType}:${input.identityValue}`)
+      .digest("hex");
+    const requestHash = createHmac("sha256", this.idempotencySecret)
+      .update(
+        JSON.stringify({
+          userId: input.userId,
+          identityType: input.identityType,
+          identifierHash,
+          livenessReference: input.livenessReference,
+          consentId: input.consentId,
+          provider: provider.name,
+        }),
+      )
+      .digest("hex");
+    const initial = await withTenantTransaction(
+      this.database,
+      input.tenantId,
+      async (transaction) => {
+        const idempotency = new IdempotencyRepository(transaction);
+        const claim = await idempotency.claim({
+          tenantId: input.tenantId,
+          key: input.idempotencyKey,
+          operation: "kyc.biometric.verify",
+          requestHash,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        });
+        if (!claim.created) {
+          if (claim.record.status === "COMPLETED")
+            return {
+              replay: claim.record.response_body as KycVerificationView,
+            };
+          throw new ApiError(
+            409,
+            "REQUEST_IN_PROGRESS",
+            "An equivalent biometric request is in progress",
+          );
+        }
+        const customer = await new CustomerRepository(transaction).findByUserId(
+          input.userId,
+        );
+        if (!customer)
+          throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
+        if (
+          !(await new ConsentRepository(transaction).hasActiveKycConsent({
+            consentId: input.consentId,
+            userId: input.userId,
+          }))
+        )
+          throw new ApiError(
+            422,
+            "KYC_CONSENT_REQUIRED",
+            "Active KYC consent is required",
+          );
+        await new KycRepository(transaction).create({
+          verificationId,
+          tenantId: input.tenantId,
+          customerId: customer.id,
+          consentId: input.consentId,
+          identityType: "BIOMETRIC",
+          providerName: provider.name,
+        });
+        return { customerId: customer.id };
+      },
+    );
+    if ("replay" in initial) return initial.replay;
+    const providerResult = await provider.verifyBiometric({
+      verificationId,
+      identityType: input.identityType,
+      identityValue: input.identityValue,
+      livenessReference: input.livenessReference,
+    });
+    return withTenantTransaction(
+      this.database,
+      input.tenantId,
+      async (transaction) => {
+        const repository = new KycRepository(transaction);
+        const record = await repository.recordProviderResult({
+          verificationId,
+          ...providerResult,
+        });
+        if (providerResult.outcome === "VERIFIED")
+          await repository.recordEvidence({
+            tenantId: input.tenantId,
+            verificationId,
+            consentId: input.consentId,
+            identityType: input.identityType,
+            identifierMasked: maskedIdentity,
+            identifierHash,
+            hashKeyId: this.evidenceKeys.identifierHashKeyId,
+            providerReference: providerResult.providerReference,
+            providerConfigurationVersion:
+              providerResult.providerConfigurationVersion,
+            ...this.signResult(providerResult),
+            retainUntil: new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000),
+          });
+        const response = toView(record, maskedIdentity);
+        await new IdempotencyRepository(transaction).complete({
+          tenantId: input.tenantId,
+          key: input.idempotencyKey,
+          operation: "kyc.biometric.verify",
           responseCode: 202,
           responseBody: response,
         });

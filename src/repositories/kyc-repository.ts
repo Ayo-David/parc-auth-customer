@@ -12,7 +12,7 @@ export interface KycVerificationRecord {
   id: string;
   tenant_id: string;
   customer_id: string;
-  verification_type: KycIdentityType;
+  verification_type: KycIdentityType | "BIOMETRIC";
   provider_name: KycProviderName;
   provider_reference: string | null;
   provider_configuration_version: string | null;
@@ -39,7 +39,7 @@ export class KycRepository {
     tenantId: string;
     customerId: string;
     consentId: string;
-    identityType: KycIdentityType;
+    identityType: KycIdentityType | "BIOMETRIC";
     providerName: KycProviderName;
   }): Promise<KycVerificationRecord> {
     const [record] = await this.transaction<KycVerificationRecord>(

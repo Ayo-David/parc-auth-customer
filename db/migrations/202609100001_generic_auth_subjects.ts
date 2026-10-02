@@ -56,7 +56,8 @@ export async function up(knex: Knex): Promise<void> {
       ADD COLUMN authorization_version integer,
       ADD CONSTRAINT authentication_challenges_subject_type_check CHECK (subject_type IS NULL OR subject_type IN ('CUSTOMER', 'ADMINISTRATOR')),
       ADD CONSTRAINT authentication_challenges_scope_type_check CHECK (scope_type IS NULL OR scope_type IN ('TENANT', 'PLATFORM')),
-      ADD CONSTRAINT authentication_challenges_authorization_version_check CHECK (authorization_version IS NULL OR authorization_version >= 1),
+      ADD CONSTRAINT authentication_challenges_authorization_version_check CHECK (authorization_version IS NULL OR authorization_version >= 1);
+    ALTER TABLE authentication_challenges
       ADD CONSTRAINT authentication_challenges_subject_check CHECK (
         (subject_id IS NULL AND user_id IS NULL AND subject_type IS NULL AND scope_type IS NULL)
         OR
@@ -66,10 +67,12 @@ export async function up(knex: Knex): Promise<void> {
           (scope_type = 'TENANT' AND tenant_id IS NOT NULL)
           OR (scope_type = 'PLATFORM' AND tenant_id IS NULL)
         ) AND authorization_version IS NOT NULL)
-      );
+      ) NOT VALID;
     UPDATE authentication_challenges
       SET subject_id = user_id, subject_type = 'CUSTOMER', scope_type = 'TENANT'
       WHERE user_id IS NOT NULL;
+    ALTER TABLE authentication_challenges
+      VALIDATE CONSTRAINT authentication_challenges_subject_check;
     CREATE INDEX idx_auth_challenge_subject ON authentication_challenges(subject_type, scope_type, tenant_id, subject_id) WHERE consumed_at IS NULL;
 
     DROP POLICY tenant_isolation_policy ON user_sessions;

@@ -1,7 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import type { AuthenticatedCustomer } from "../security/access-token-verifier.js";
+import { principalOf } from "../security/parc-service-auth.js";
 import type { TransactionAuthorizationService } from "../services/transaction-authorization-service.js";
 import { ApiError } from "./api-error.js";
 
@@ -53,21 +53,11 @@ function identity(value?: AuthenticatedCustomer): AuthenticatedCustomer {
     throw new ApiError(401, "UNAUTHORIZED", "Authentication required");
   return value;
 }
-function authorized(value: string | undefined, expected: string): boolean {
-  const supplied = Buffer.from(
-    value?.startsWith("Bearer ") ? value.slice(7) : "",
-  );
-  const expectedBuffer = Buffer.from(expected);
-  return (
-    supplied.length === expectedBuffer.length &&
-    timingSafeEqual(supplied, expectedBuffer)
-  );
-}
 
 export function createTransactionAuthorizationRouter(
   service: TransactionAuthorizationService,
   authenticate: RequestHandler,
-  internalServiceToken: string,
+  consumeAccess: RequestHandler,
 ): Router {
   const router = Router();
   router.post(
@@ -102,19 +92,22 @@ export function createTransactionAuthorizationRouter(
   );
   router.post(
     "/internal/v1/transaction-authorizations/consume",
+    consumeAccess,
     async (request, response, next) => {
       try {
-        if (!authorized(request.header("authorization"), internalServiceToken))
-          throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
+        const principal = principalOf(request);
         const input = consumeSchema.parse(request.body);
+        // The delegated user must be the customer whose authorization is consumed.
+        if (principal.subject?.id !== input.customer_id)
+          throw new ApiError(403, "SUBJECT_MISMATCH", "Customer mismatch");
         response.status(200).json(
           await service.consume({
-            tenantId: z.string().uuid().parse(header(request, "x-tenant-id")),
+            tenantId: z.string().uuid().parse(principal.tenantId),
             customerId: input.customer_id,
             commandType: input.command_type,
             resourceId: input.resource_id,
             token: input.authorization_token,
-            serviceName: header(request, "x-service-name"),
+            serviceName: principal.client,
             idempotencyKey: header(request, "idempotency-key"),
           }),
         );

@@ -67,16 +67,199 @@ export class CustomerExperienceService {
       const now = Date.now();
       return {
         items: rows.map((row: Record<string, unknown>) => {
+          const retainUntil = row.content_retain_until;
           const retained =
-            row.content_retain_until === null ||
-            new Date(String(row.content_retain_until)).getTime() > now;
-          const { content_retain_until: _retention, ...metadata } = row;
-          void _retention;
+            retainUntil === null ||
+            (retainUntil instanceof Date
+              ? retainUntil.getTime()
+              : typeof retainUntil === "string"
+                ? new Date(retainUntil).getTime()
+                : 0) > now;
+          const metadata = { ...row };
+          delete metadata.content_retain_until;
           return retained
             ? metadata
             : { ...metadata, subject: null, body: null, content_expired: true };
         }),
       };
+    });
+  }
+
+  public notificationPreferences(
+    tenantId: string,
+    userId: string,
+  ): Promise<{ items: unknown[] }> {
+    return withTenantTransaction(this.database, tenantId, async (tx) => ({
+      items: await tx("notification_preferences")
+        .where({ tenant_id: tenantId, user_id: userId })
+        .orderBy("notification_category")
+        .select(
+          "notification_category",
+          "push_enabled",
+          "sms_enabled",
+          "email_enabled",
+          "in_app_enabled",
+          "updated_at",
+        ),
+    }));
+  }
+
+  public updateNotificationPreference(input: {
+    tenantId: string;
+    userId: string;
+    category: string;
+    pushEnabled: boolean;
+    smsEnabled: boolean;
+    emailEnabled: boolean;
+    inAppEnabled: boolean;
+  }): Promise<Record<string, unknown>> {
+    return withTenantTransaction(this.database, input.tenantId, async (tx) => {
+      const [row] = await tx("notification_preferences")
+        .insert({
+          tenant_id: input.tenantId,
+          user_id: input.userId,
+          notification_category: input.category,
+          push_enabled: input.pushEnabled,
+          sms_enabled: input.smsEnabled,
+          email_enabled: input.emailEnabled,
+          in_app_enabled: input.inAppEnabled,
+        })
+        .onConflict(["user_id", "notification_category"])
+        .merge({
+          push_enabled: input.pushEnabled,
+          sms_enabled: input.smsEnabled,
+          email_enabled: input.emailEnabled,
+          in_app_enabled: input.inAppEnabled,
+          updated_at: tx.fn.now(),
+        })
+        .returning([
+          "notification_category",
+          "push_enabled",
+          "sms_enabled",
+          "email_enabled",
+          "in_app_enabled",
+          "updated_at",
+        ]);
+      if (!row) throw new Error("Notification preference was not persisted");
+      return row as Record<string, unknown>;
+    });
+  }
+
+  public registerPushDevice(input: {
+    tenantId: string;
+    userId: string;
+    deviceIdentifier: string;
+    pushToken: string;
+    platform: "ANDROID" | "IOS";
+    deviceName?: string;
+    osVersion?: string;
+    appVersion?: string;
+  }): Promise<Record<string, unknown>> {
+    return withTenantTransaction(this.database, input.tenantId, async (tx) => {
+      await tx.raw("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", [
+        `${input.tenantId}:${input.userId}:${input.deviceIdentifier}`,
+      ]);
+      const existingRows = await tx<{
+        id: string;
+        tenant_id: string;
+        user_id: string;
+        device_identifier: string;
+        deleted_at: Date | null;
+      }>("user_devices")
+        .where({
+          tenant_id: input.tenantId,
+          user_id: input.userId,
+          device_identifier: input.deviceIdentifier,
+        })
+        .whereNull("deleted_at")
+        .limit(1)
+        .select("id");
+      const existing = existingRows[0];
+      const values = {
+        push_token: input.pushToken,
+        platform: input.platform,
+        device_name: input.deviceName ?? null,
+        os_version: input.osVersion ?? null,
+        app_version: input.appVersion ?? null,
+        status: "ACTIVE",
+        last_seen_at: tx.fn.now(),
+        updated_at: tx.fn.now(),
+      };
+      const [row] = existing
+        ? await tx("user_devices")
+            .where({ id: existing.id })
+            .update(values)
+            .returning([
+              "id",
+              "device_name",
+              "platform",
+              "status",
+              "last_seen_at",
+            ])
+        : await tx("user_devices")
+            .insert({
+              tenant_id: input.tenantId,
+              user_id: input.userId,
+              device_identifier: input.deviceIdentifier,
+              ...values,
+            })
+            .returning([
+              "id",
+              "device_name",
+              "platform",
+              "status",
+              "last_seen_at",
+            ]);
+      if (!row) throw new Error("Push device was not persisted");
+      return row as Record<string, unknown>;
+    });
+  }
+
+  public revokeDevice(
+    tenantId: string,
+    userId: string,
+    deviceId: string,
+  ): Promise<void> {
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const changed = await tx("user_devices")
+        .where({ id: deviceId, tenant_id: tenantId, user_id: userId })
+        .whereNull("deleted_at")
+        .update({
+          status: "REVOKED",
+          push_token: null,
+          is_trusted: false,
+          deleted_at: tx.fn.now(),
+          updated_at: tx.fn.now(),
+        });
+      if (changed === 0) {
+        const existing = await tx("user_devices")
+          .where({ id: deviceId, tenant_id: tenantId, user_id: userId })
+          .first("id");
+        if (!existing) throw new Error("Device not found");
+      }
+      await tx("user_sessions")
+        .where({ tenant_id: tenantId, subject_id: userId, device_id: deviceId })
+        .whereNull("revoked_at")
+        .update({ revoked_at: tx.fn.now(), refresh_token_hash: null });
+    });
+  }
+
+  public revokeSession(
+    tenantId: string,
+    userId: string,
+    sessionId: string,
+  ): Promise<void> {
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const changed = await tx("user_sessions")
+        .where({ id: sessionId, tenant_id: tenantId, subject_id: userId })
+        .whereNull("revoked_at")
+        .update({ revoked_at: tx.fn.now(), refresh_token_hash: null });
+      if (changed === 0) {
+        const existing = await tx("user_sessions")
+          .where({ id: sessionId, tenant_id: tenantId, subject_id: userId })
+          .first("id");
+        if (!existing) throw new Error("Session not found");
+      }
     });
   }
 

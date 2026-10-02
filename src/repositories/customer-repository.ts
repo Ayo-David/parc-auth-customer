@@ -43,6 +43,13 @@ export class CustomerRepository {
       .first();
   }
 
+  public findById(id: string): Promise<CustomerProfileRecord | undefined> {
+    return this.transaction<CustomerProfileRecord>("customer_profiles")
+      .where({ id })
+      .whereNull("deleted_at")
+      .first();
+  }
+
   public async update(
     userId: string,
     input: { firstName?: string; lastName?: string },

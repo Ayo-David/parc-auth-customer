@@ -1,0 +1,240 @@
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CONTAINER_NAME: parc-auth-customer
+
+jobs:
+  # 1. TEST JOB
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: parc_auth_customer_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/parc_auth_customer_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/parc_auth_customer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.21.1
+          cache: yarn
+      - run: corepack enable
+      - run: yarn install --frozen-lockfile
+      - run: yarn migrate:latest
+      - run: yarn validate
+
+  # 2. BUILD & PUSH JOB (Strictly using short-sha & build provenance)
+  build-and-push:
+    needs: validate
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Crucial: gives GITHUB_TOKEN permission to publish packages
+
+    outputs:
+      short_sha: ${{ steps.meta.outputs.version }} # Passes the short SHA to the deploy job
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }} # No external secrets needed here
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Primary immutable deployment unit (outputs format: sha-xxxxxxx)
+            type=sha,prefix=sha-,format=short,priority=300
+            # Floating convenience tag for development visibility
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }},priority=100
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true # Enforces build provenance generation (SLSA framework)
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 3. DEPLOY JOB (Runs via SSH after build completes successfully)
+  # Runtime secrets come from /opt/parc/parc-auth-customer/.env on the server, not GitHub secrets.
+  deploy:
+    needs: build-and-push
+    if: always() && needs.build-and-push.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production # requires manual approval if the "production" environment has protection rules configured
+    concurrency:
+      group: deploy-parc-auth-customer
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SHORT_SHA: ${{ needs.build-and-push.outputs.short_sha }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: REGISTRY,IMAGE_NAME,CONTAINER_NAME,SHORT_SHA
+          script: |
+            set -euo pipefail
+
+            # Non-secret service identity; these override the same keys if they also appear in the env file.
+            export NODE_ENV=production HOST=0.0.0.0 SERVICE_NAME=parc-auth-customer PORT=3001 RATE_LIMIT_STORE=redis NOTIFICATION_WORKER_ENABLED=true
+            # Image references must be lowercase; metadata-action lowercased the pushed name.
+            IMAGE_NAME=$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+            # Per-service server state: .env plus current/previous image tags for rollback.
+            STATE_ROOT=/opt/parc
+            STATE_DIR="$STATE_ROOT/${CONTAINER_NAME}"
+            # Secrets and environment-specific settings live only on the server, never in GitHub.
+            ENV_FILE="$STATE_DIR/.env"
+            if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+              echo "Cannot create $STATE_DIR. Prepare the server once: sudo mkdir -p $STATE_ROOT && sudo chown $(id -un):$(id -gn) $STATE_ROOT" >&2
+              exit 1
+            fi
+            chmod 700 "$STATE_DIR"
+
+            if [ ! -f "$ENV_FILE" ]; then
+              LEGACY_DIR="$HOME/parc/${CONTAINER_NAME}"
+              if [ -f "$LEGACY_DIR/.env" ]; then
+                echo "Missing $ENV_FILE, but $LEGACY_DIR/.env exists from the previous layout. Copy it once: cp -a $LEGACY_DIR/. $STATE_DIR/" >&2
+              else
+                echo "Missing $ENV_FILE on the server; create it from the repository's .env.example first." >&2
+              fi
+              exit 1
+            fi
+            chmod 600 "$ENV_FILE"
+
+            # Last assignment wins, matching docker --env-file.
+            env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
+
+            for key in DATABASE_URL TENANT_ADMIN_INTERNAL_URL SERVICE_CLIENT_KEYS_JSON IDEMPOTENCY_HASH_SECRET CHALLENGE_HASH_SECRET REDIS_URL JWT_ISSUER JWT_ACTIVE_KID JWT_PRIVATE_KEY_BASE64 JWT_PUBLIC_KEYS_JSON TOKEN_HASH_SECRET VERIFYME_API_KEY KYC_IDENTIFIER_HASH_SECRET KYC_RESULT_SIGNING_SECRET RABBITMQ_URL NOTIFICATION_TARGET_HASH_SECRET BREVO_API_KEY TERMII_API_KEY; do
+              if [ -z "$(env_value "$key")" ]; then
+                echo "$ENV_FILE must set $key." >&2
+                exit 1
+              fi
+            done
+
+            # Optional Firebase service account for push notifications (FCM application default credentials).
+            FIREBASE_CREDENTIALS="$STATE_DIR/firebase-service-account.json"
+            FIREBASE_ARGS=()
+            if [ -f "$FIREBASE_CREDENTIALS" ]; then
+              # The container runs as the unprivileged "node" user; STATE_DIR (0700) keeps it private on the host.
+              chmod 644 "$FIREBASE_CREDENTIALS"
+              FIREBASE_ARGS=(-v "$FIREBASE_CREDENTIALS:/run/secrets/firebase-service-account.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/firebase-service-account.json)
+            fi
+
+            stop_service() {
+              docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+              docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            }
+
+            start_service() {
+              # The image tag (sha-xxxxxxx) is the running version, including after a rollback.
+              export SERVICE_VERSION="${1##*:}"
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                --restart always \
+                --network host \
+                --env-file "$ENV_FILE" \
+                -e NODE_ENV -e HOST -e PORT -e SERVICE_NAME -e SERVICE_VERSION -e RATE_LIMIT_STORE -e NOTIFICATION_WORKER_ENABLED ${FIREBASE_ARGS[@]+"${FIREBASE_ARGS[@]}"} \
+                "$1"
+            }
+
+            service_ready() {
+              curl --fail --silent --max-time 2 "http://127.0.0.1:${PORT}/ready" >/dev/null
+            }
+
+            wait_until_ready() {
+              # Give crash-looping containers time to show up as restarts before the first probe.
+              sleep 5
+              for _ in $(seq 1 20); do
+                service_ready && return 0
+                sleep 3
+              done
+              return 1
+            }
+
+            IMAGE_URI="${REGISTRY}/${IMAGE_NAME}:${SHORT_SHA}"
+
+            # The server keeps its own GHCR login (docker login ghcr.io, run once on the host).
+            echo "Pulling immutable deployment unit: $IMAGE_URI"
+            docker pull "$IMAGE_URI"
+
+            # Preserve the last known-good image as the rollback target.
+            if [ -f "$STATE_DIR/current_image.txt" ]; then
+              cp "$STATE_DIR/current_image.txt" "$STATE_DIR/previous_image.txt"
+            fi
+
+            # --- STEP 1: RUN DATABASE MIGRATIONS (forward-only; never reverted on rollback) ---
+            # MIGRATION_DATABASE_URL lets migrations use a DDL-owning login while the
+            # application keeps its least-privilege DATABASE_URL; it falls back to DATABASE_URL.
+            MIGRATION_DATABASE_URL=$(env_value MIGRATION_DATABASE_URL)
+            [ -n "$MIGRATION_DATABASE_URL" ] || MIGRATION_DATABASE_URL=$(env_value DATABASE_URL)
+            echo "Running production database migrations..."
+            DATABASE_URL="$MIGRATION_DATABASE_URL" docker run --rm \
+              --name "${CONTAINER_NAME}-migration" \
+              --network host \
+              -e NODE_ENV \
+              -e DATABASE_URL \
+              "$IMAGE_URI" \
+              yarn migrate:runtime
+
+            # --- STEP 2: SWAP APPLICATION CONTAINERS ---
+            echo "Replacing application containers..."
+            stop_service
+            start_service "$IMAGE_URI"
+
+            # --- STEP 3: HEALTH-CHECK THE NEW CONTAINERS, AUTO-ROLLBACK ON FAILURE ---
+            echo "Waiting for the new containers to report ready..."
+            if wait_until_ready; then
+              echo "$IMAGE_URI" > "$STATE_DIR/current_image.txt"
+              echo "Deploy succeeded: $IMAGE_URI"
+              docker image prune -af --filter "until=72h"
+            else
+              echo "New containers failed readiness checks; rolling back." >&2
+              docker logs --tail 50 "$CONTAINER_NAME" >&2 || true
+              stop_service
+              if [ -f "$STATE_DIR/previous_image.txt" ]; then
+                start_service "$(cat "$STATE_DIR/previous_image.txt")"
+              fi
+              exit 1
+            fi

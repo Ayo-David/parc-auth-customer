@@ -39,6 +39,17 @@ class FakeKycProvider implements KycProvider {
     this.lastIdentityValue = input.identityValue;
     return Promise.resolve(this.result);
   }
+
+  public verifyBiometric(input: {
+    verificationId: string;
+    identityType: "NIN" | "BVN";
+    identityValue: string;
+    livenessReference: string;
+  }): Promise<KycProviderResult> {
+    this.calls += 1;
+    this.lastIdentityValue = input.identityValue;
+    return Promise.resolve(this.result);
+  }
 }
 
 beforeAll(() => {

@@ -39,14 +39,16 @@ import { NotificationRabbitWorker } from "./messaging/notification-rabbit-worker
 import { TransactionAuthorizationService } from "./services/transaction-authorization-service.js";
 import { ApiError } from "./http/api-error.js";
 import { CustomerExperienceService } from "./services/customer-experience-service.js";
+import { OnboardingService } from "./services/onboarding-service.js";
+import { LendingEligibilityService } from "./services/lending-eligibility-service.js";
+import { ServiceTokenService } from "./services/service-token-service.js";
+import { ClientAssertionVerifier } from "./security/client-assertion-verifier.js";
+import { createParcAuth } from "./security/parc-service-auth.js";
+import { scopeCatalogue } from "./security/scope-catalogue.js";
 
 const config = loadConfig();
 const logger = createLogger(config);
 const database = createDatabase(config);
-const tenantAdmin = new HttpTenantAdminClient(
-  config.TENANT_ADMIN_INTERNAL_URL,
-  config.INTERNAL_SERVICE_TOKEN,
-);
 const redis =
   config.RATE_LIMIT_STORE === "redis"
     ? createClient({ url: config.REDIS_URL })
@@ -72,6 +74,18 @@ const jwtKeys = await createJwtKeyRing({
     ? { publicKeysJson: config.JWT_PUBLIC_KEYS_JSON }
     : {}),
 });
+// Auth signs its own outbound service tokens; the issuer is wired lazily
+// because it needs the session service, which needs this client.
+const issuer: { current?: ServiceTokenService } = {};
+const tenantAdmin = new HttpTenantAdminClient(
+  config.TENANT_ADMIN_INTERNAL_URL,
+  {
+    authorization: (input) => {
+      if (!issuer.current) throw new Error("Service token issuer is not ready");
+      return issuer.current.authorization(input);
+    },
+  },
+);
 const sessionService = new SessionService(
   database,
   jwtKeys,
@@ -183,6 +197,20 @@ const transactionAuthorizationService = new TransactionAuthorizationService(
   },
   config.TOKEN_HASH_SECRET,
 );
+const serviceTokens = new ServiceTokenService({
+  keys: jwtKeys,
+  issuer: config.JWT_ISSUER,
+  catalogue: scopeCatalogue,
+  tenants: tenantAdmin,
+  administrators: tenantAdmin,
+  sessions: sessionService,
+});
+issuer.current = serviceTokens;
+const clientAssertions = await ClientAssertionVerifier.create({
+  clientKeysJson: config.SERVICE_CLIENT_KEYS_JSON,
+  audience: config.JWT_ISSUER,
+  replay: rateLimiter,
+});
 const app = createApp({
   config,
   logger,
@@ -219,7 +247,25 @@ const app = createApp({
   kycService,
   transactionAuthorizationService,
   customerExperienceService: new CustomerExperienceService(database),
+  onboardingService: new OnboardingService(
+    database,
+    tenantAdmin,
+    config.IDEMPOTENCY_HASH_SECRET,
+  ),
+  lendingEligibilityService: new LendingEligibilityService(database),
   jwks: await publicJwks(jwtKeys),
+  serviceTokens: { clients: clientAssertions, tokens: serviceTokens },
+  // Auth verifies issued tokens with its own key ring rather than over HTTP.
+  serviceAuth: createParcAuth({
+    issuer: config.JWT_ISSUER,
+    audience: config.SERVICE_NAME,
+    allowPlatformTenant: true,
+    keys: (header) => {
+      const key = header.kid ? jwtKeys.publicKeys.get(header.kid) : undefined;
+      if (!key) throw new Error("Unknown signing key");
+      return key;
+    },
+  }),
   administratorAuthenticationService: new AdministratorAuthenticationService(
     database,
     tenantAdmin,

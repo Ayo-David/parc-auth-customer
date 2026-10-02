@@ -94,3 +94,34 @@ test("routes incomplete matching data to manual review instead of failing identi
   expect(result.outcome).toBe("MANUAL_REVIEW");
   expect(result.resultCode).toBe("VALIDATION_ERROR");
 });
+
+test("requires VerifyMe liveness and face-match evidence", async () => {
+  const fetchImplementation = jest.fn<typeof fetch>().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        isLive: true,
+        identityMatches: true,
+        identityDetails: { idNumber: "10000000001", photo: "sensitive" },
+      }),
+      { status: 200 },
+    ),
+  );
+  const result = await provider(fetchImplementation).verifyBiometric({
+    verificationId: "verification-id",
+    identityType: "NIN",
+    identityValue: "10000000001",
+    livenessReference: "face-reference",
+  });
+  expect(result).toMatchObject({
+    outcome: "VERIFIED",
+    providerReference: "face-reference",
+    resultCode: "LIVENESS_AND_FACE_MATCHED",
+    safeResult: {
+      status: "success",
+      liveness_verified: true,
+      face_matched: true,
+    },
+  });
+  expect(JSON.stringify(result)).not.toContain("10000000001");
+  expect(JSON.stringify(result)).not.toContain("sensitive");
+});

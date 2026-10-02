@@ -13,6 +13,13 @@ const loginSchema = z
     device_id: z.string().uuid(),
   })
   .strict();
+const passcodeLoginSchema = z
+  .object({
+    identifier: z.string().min(3).max(254),
+    passcode: z.string().regex(/^[0-9]{6}$/),
+    device_id: z.string().uuid(),
+  })
+  .strict();
 const pinSchema = z.object({ pin: z.string().regex(/^[0-9]{4,6}$/) }).strict();
 const confirmSchema = z
   .object({
@@ -45,6 +52,24 @@ const otpVerifySchema = z
     code: z.string().regex(/^[0-9]{6}$/),
   })
   .strict();
+const passcodeRecoveryRequestSchema = z
+  .object({
+    identifier: z.string().min(3).max(254),
+    channel: z.enum(["SMS", "EMAIL"]),
+  })
+  .strict();
+const passcodeRecoveryConfirmSchema = z
+  .object({
+    challenge_id: z.string().uuid(),
+    code: z.string().regex(/^[0-9]{6}$/),
+    new_passcode: z.string().regex(/^[0-9]{6}$/),
+    new_passcode_confirmation: z.string().regex(/^[0-9]{6}$/),
+  })
+  .strict()
+  .refine((value) => value.new_passcode === value.new_passcode_confirmation, {
+    path: ["new_passcode_confirmation"],
+    message: "Passcode confirmation must match",
+  });
 
 function header(
   request: { header(name: string): string | undefined },
@@ -87,7 +112,60 @@ export function createAuthenticationRouter(
       next(error);
     }
   });
+  router.post("/v1/auth/passcode/login", async (request, response, next) => {
+    try {
+      const input = passcodeLoginSchema.parse(request.body);
+      response.status(200).json(
+        await authentication.loginWithPasscode({
+          tenantId: z.string().uuid().parse(header(request, "x-tenant-id")),
+          idempotencyKey: header(request, "idempotency-key"),
+          identifier: input.identifier,
+          passcode: input.passcode,
+          deviceId: input.device_id,
+        }),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
   if (otp) {
+    router.post(
+      "/v1/auth/passcode/recovery/request",
+      async (request, response, next) => {
+        try {
+          const input = passcodeRecoveryRequestSchema.parse(request.body);
+          response.status(202).json(
+            await otp.request({
+              tenantId: z.string().uuid().parse(header(request, "x-tenant-id")),
+              idempotencyKey: header(request, "idempotency-key"),
+              purpose: "PASSWORD_RESET",
+              channel: input.channel,
+              destination: input.identifier,
+            }),
+          );
+        } catch (error) {
+          next(error);
+        }
+      },
+    );
+    router.post(
+      "/v1/auth/passcode/recovery/confirm",
+      async (request, response, next) => {
+        try {
+          const input = passcodeRecoveryConfirmSchema.parse(request.body);
+          await otp.resetLoginPasscode({
+            tenantId: z.string().uuid().parse(header(request, "x-tenant-id")),
+            idempotencyKey: header(request, "idempotency-key"),
+            challengeId: input.challenge_id,
+            code: input.code,
+            newPasscode: input.new_passcode,
+          });
+          response.status(204).send();
+        } catch (error) {
+          next(error);
+        }
+      },
+    );
     router.post("/v1/auth/otp/request", async (request, response, next) => {
       try {
         const input = otpRequestSchema.parse(request.body);

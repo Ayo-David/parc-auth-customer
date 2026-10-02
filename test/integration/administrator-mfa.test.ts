@@ -120,7 +120,7 @@ integrationTest(
       subject_type: "ADMINISTRATOR",
       scope: "TENANT",
       authorization_version: 7,
-      aud: ["admin-bff", "tenant-admin"],
+      aud: "admin-bff",
     });
     expect((claims.exp ?? 0) - (claims.iat ?? 0)).toBe(300);
     await expect(

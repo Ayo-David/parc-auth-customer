@@ -35,6 +35,15 @@ The A-05 passwordless flow supports login, phone verification, email verificatio
 
 The A-06 session layer issues RS256 access tokens with `kid`, issuer, audience, subject, tenant, session, subject-type, and authentication-method claims. Access tokens live for 15 minutes and are accepted only while their PostgreSQL session remains active. Refresh values are random opaque secrets retained only as keyed hashes, rotate on every use, and trigger whole-family compromise and revocation when reused. Logout immediately revokes the current session, introspection checks both JWT validity and live session state, and revocations are published through the transactional outbox.
 
+## Service-to-service tokens
+
+Auth is the issuer for all internal calls. `POST /internal/v1/oauth/token` accepts RFC 7523 `private_key_jwt` client assertions: each service signs a 60-second ES256 assertion with its own private key, and Auth verifies it against the public keys registered in `SERVICE_CLIENT_KEYS_JSON`. Assertion `jti` values are single-use through the configured rate-limit store.
+
+- `client_credentials` issues a service-only token for background and pre-login work.
+- RFC 8693 token exchange issues a delegated token: the caller presents the user's access token (BFFs) or a delegated token issued to it (domain services). Auth checks the live session, the subject's tenant, and the user's entitlement to every requested scope. Administrators are checked against their current Tenant Admin permissions.
+
+Tokens are RS256, bound to one audience, and live at most 300 seconds. Delegated tokens never outlive their subject token. The client policy and scope catalogue in `src/security/scope-catalogue.ts` are a reviewed copy of `parc-contracts/security/scopes.v1.json`. Auth's own calls to Tenant Admin use locally signed service tokens. Its internal routes accept only issued tokens, validated by the shared `src/security/parc-service-auth.ts` module with explicit route policies.
+
 Development generates an ephemeral RSA key pair at startup. Production requires `JWT_PRIVATE_KEY_BASE64`, `JWT_PUBLIC_KEYS_JSON`, and `JWT_ACTIVE_KID`; retaining prior public keys in the JSON set provides controlled verification overlap during signing-key rotation.
 
 The A-09 KYC slice exposes authenticated, tenant-bound initiation and status endpoints for NIN and BVN verification. `KycProvider` keeps provider behavior behind a replaceable boundary, with VerifyMe as the first adapter. The service requires an active customer-owned KYC consent, uses keyed identifier hashes, retains only masked identifiers and redacted results, signs normalized evidence, and emits a privacy-minimized KYC status event. Provider timeouts and non-definitive failures remain `PENDING`; they are never converted into a failed identity decision.

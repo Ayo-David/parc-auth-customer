@@ -1,0 +1,145 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to roll back to (e.g. sha-abc1234). Leave blank to use the image that was running immediately before the last deploy."
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CONTAINER_NAME: parc-auth-customer
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-parc-auth-customer
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Roll back VPS deployment
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          REQUESTED_TAG: ${{ inputs.image_tag }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: REGISTRY,IMAGE_NAME,CONTAINER_NAME,REQUESTED_TAG
+          script: |
+            set -euo pipefail
+
+            # Non-secret service identity; these override the same keys if they also appear in the env file.
+            export NODE_ENV=production HOST=0.0.0.0 SERVICE_NAME=parc-auth-customer PORT=3001 RATE_LIMIT_STORE=redis NOTIFICATION_WORKER_ENABLED=true
+            # Image references must be lowercase; metadata-action lowercased the pushed name.
+            IMAGE_NAME=$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+            # Per-service server state: .env plus current/previous image tags for rollback.
+            STATE_ROOT=/opt/parc
+            STATE_DIR="$STATE_ROOT/${CONTAINER_NAME}"
+            # Secrets and environment-specific settings live only on the server, never in GitHub.
+            ENV_FILE="$STATE_DIR/.env"
+            if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+              echo "Cannot create $STATE_DIR. Prepare the server once: sudo mkdir -p $STATE_ROOT && sudo chown $(id -un):$(id -gn) $STATE_ROOT" >&2
+              exit 1
+            fi
+            chmod 700 "$STATE_DIR"
+
+            if [ ! -f "$ENV_FILE" ]; then
+              LEGACY_DIR="$HOME/parc/${CONTAINER_NAME}"
+              if [ -f "$LEGACY_DIR/.env" ]; then
+                echo "Missing $ENV_FILE, but $LEGACY_DIR/.env exists from the previous layout. Copy it once: cp -a $LEGACY_DIR/. $STATE_DIR/" >&2
+              else
+                echo "Missing $ENV_FILE on the server; create it from the repository's .env.example first." >&2
+              fi
+              exit 1
+            fi
+            chmod 600 "$ENV_FILE"
+
+            # Last assignment wins, matching docker --env-file.
+            env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
+
+            for key in DATABASE_URL TENANT_ADMIN_INTERNAL_URL SERVICE_CLIENT_KEYS_JSON IDEMPOTENCY_HASH_SECRET CHALLENGE_HASH_SECRET REDIS_URL JWT_ISSUER JWT_ACTIVE_KID JWT_PRIVATE_KEY_BASE64 JWT_PUBLIC_KEYS_JSON TOKEN_HASH_SECRET VERIFYME_API_KEY KYC_IDENTIFIER_HASH_SECRET KYC_RESULT_SIGNING_SECRET RABBITMQ_URL NOTIFICATION_TARGET_HASH_SECRET BREVO_API_KEY TERMII_API_KEY; do
+              if [ -z "$(env_value "$key")" ]; then
+                echo "$ENV_FILE must set $key." >&2
+                exit 1
+              fi
+            done
+
+            # Optional Firebase service account for push notifications (FCM application default credentials).
+            FIREBASE_CREDENTIALS="$STATE_DIR/firebase-service-account.json"
+            FIREBASE_ARGS=()
+            if [ -f "$FIREBASE_CREDENTIALS" ]; then
+              # The container runs as the unprivileged "node" user; STATE_DIR (0700) keeps it private on the host.
+              chmod 644 "$FIREBASE_CREDENTIALS"
+              FIREBASE_ARGS=(-v "$FIREBASE_CREDENTIALS:/run/secrets/firebase-service-account.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/firebase-service-account.json)
+            fi
+
+            stop_service() {
+              docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+              docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            }
+
+            start_service() {
+              # The image tag (sha-xxxxxxx) is the running version, including after a rollback.
+              export SERVICE_VERSION="${1##*:}"
+              docker run -d \
+                --name "$CONTAINER_NAME" \
+                --restart always \
+                --network host \
+                --env-file "$ENV_FILE" \
+                -e NODE_ENV -e HOST -e PORT -e SERVICE_NAME -e SERVICE_VERSION -e RATE_LIMIT_STORE -e NOTIFICATION_WORKER_ENABLED ${FIREBASE_ARGS[@]+"${FIREBASE_ARGS[@]}"} \
+                "$1"
+            }
+
+            service_ready() {
+              curl --fail --silent --max-time 2 "http://127.0.0.1:${PORT}/ready" >/dev/null
+            }
+
+            wait_until_ready() {
+              # Give crash-looping containers time to show up as restarts before the first probe.
+              sleep 5
+              for _ in $(seq 1 20); do
+                service_ready && return 0
+                sleep 3
+              done
+              return 1
+            }
+
+            if [ -n "$REQUESTED_TAG" ]; then
+              if [[ ! "$REQUESTED_TAG" =~ ^sha-[0-9a-f]{7}$ ]]; then
+                echo "Invalid rollback image tag; expected sha- followed by 7 lowercase hex characters." >&2
+                exit 1
+              fi
+              IMAGE_URI="${REGISTRY}/${IMAGE_NAME}:${REQUESTED_TAG}"
+            elif [ -f "$STATE_DIR/previous_image.txt" ]; then
+              IMAGE_URI=$(cat "$STATE_DIR/previous_image.txt")
+            else
+              echo "No rollback target available: pass image_tag, or deploy at least twice first so a previous image is recorded." >&2
+              exit 1
+            fi
+
+            echo "Rolling back to: $IMAGE_URI"
+            docker pull "$IMAGE_URI"
+
+            # Deliberately no migration step here: migrations are forward-only, so an
+            # application rollback never reverts schema. If the failing deploy shipped a
+            # breaking migration, that needs a reviewed forward-fix migration instead.
+
+            stop_service
+            start_service "$IMAGE_URI"
+
+            if wait_until_ready; then
+              echo "$IMAGE_URI" > "$STATE_DIR/current_image.txt"
+              echo "Rollback succeeded: $IMAGE_URI"
+            else
+              echo "Rollback containers failed readiness checks." >&2
+              docker logs --tail 50 "$CONTAINER_NAME" >&2 || true
+              exit 1
+            fi
