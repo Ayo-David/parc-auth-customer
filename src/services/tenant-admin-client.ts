@@ -105,28 +105,69 @@ export interface AdministratorTenantAdminClient {
   }): Promise<void>;
 }
 
+/** Supplies an `Authorization` header value for a Tenant Admin call. */
+export interface ServiceAuthorization {
+  authorization(input: {
+    audience: string;
+    scopes: readonly string[];
+    tenantId: string | null;
+  }): Promise<string>;
+}
+
+export interface TenantStatusReader {
+  getTenantStatus(tenantId: string): Promise<TenantStatus>;
+}
+
+export type TenantStatus = z.infer<typeof tenantStatusSchema>["status"];
+
 export class HttpTenantAdminClient
-  implements TenantAdminClient, AdministratorTenantAdminClient
+  implements
+    TenantAdminClient,
+    AdministratorTenantAdminClient,
+    TenantStatusReader
 {
   public constructor(
     private readonly baseUrl: string,
-    private readonly serviceToken: string,
+    private readonly tokens: ServiceAuthorization,
   ) {}
+
+  private async headers(
+    scope: string,
+    tenantId: string | null,
+  ): Promise<{ authorization: string }> {
+    return {
+      authorization: await this.tokens.authorization({
+        audience: "parc-tenant-admin",
+        scopes: [scope],
+        tenantId,
+      }),
+    };
+  }
+
+  public async getTenantStatus(tenantId: string): Promise<TenantStatus> {
+    const response = await fetch(
+      `${this.baseUrl}/internal/v1/tenants/${tenantId}/status`,
+      {
+        headers: {
+          ...(await this.headers("tenant.status.read", tenantId)),
+          "x-tenant-id": tenantId,
+        },
+      },
+    );
+    if (!response.ok)
+      throw new ApiError(422, "TENANT_UNAVAILABLE", "Tenant is unavailable");
+    const status = tenantStatusSchema.parse(await response.json());
+    if (status.tenant_id !== tenantId)
+      throw new ApiError(422, "TENANT_UNAVAILABLE", "Tenant is unavailable");
+    return status.status;
+  }
 
   public async validateRegistration(
     tenantId: string,
     consentIds: readonly string[],
     idempotencyKey: string,
   ): Promise<readonly ConsentDocument[]> {
-    const headers = { authorization: `Bearer ${this.serviceToken}` };
-    const statusResponse = await fetch(
-      `${this.baseUrl}/internal/v1/tenants/${tenantId}/status`,
-      { headers },
-    );
-    if (!statusResponse.ok)
-      throw new ApiError(422, "TENANT_UNAVAILABLE", "Tenant is unavailable");
-    const status = tenantStatusSchema.parse(await statusResponse.json());
-    if (status.tenant_id !== tenantId || status.status !== "ACTIVE")
+    if ((await this.getTenantStatus(tenantId)) !== "ACTIVE")
       throw new ApiError(422, "TENANT_INACTIVE", "Tenant is not active");
 
     const consentResponse = await fetch(
@@ -134,7 +175,11 @@ export class HttpTenantAdminClient
       {
         method: "POST",
         headers: {
-          ...headers,
+          ...(await this.headers(
+            "tenant.consent-documents.validate",
+            tenantId,
+          )),
+          "x-tenant-id": tenantId,
           "content-type": "application/json",
           "idempotency-key": idempotencyKey,
         },
@@ -176,7 +221,13 @@ export class HttpTenantAdminClient
       {
         method: "POST",
         headers: {
-          authorization: `Bearer ${this.serviceToken}`,
+          ...(await this.headers(
+            "tenant.administrators.authenticate",
+            input.tenantContext,
+          )),
+          ...(input.tenantContext
+            ? { "x-tenant-id": input.tenantContext }
+            : {}),
           "content-type": "application/json",
           "idempotency-key": input.idempotencyKey,
         },
@@ -204,7 +255,9 @@ export class HttpTenantAdminClient
   ): Promise<AdministratorAuthorization> {
     const response = await fetch(
       `${this.baseUrl}/internal/v1/admins/${administratorId}/authorization`,
-      { headers: { authorization: `Bearer ${this.serviceToken}` } },
+      {
+        headers: await this.headers("tenant.administrators.authenticate", null),
+      },
     );
     if (!response.ok)
       throw new ApiError(401, "AUTHORIZATION_STALE", "Authorization changed");
@@ -216,7 +269,15 @@ export class HttpTenantAdminClient
   ): Promise<TenantAuthenticationPolicy> {
     const response = await fetch(
       `${this.baseUrl}/internal/v1/tenants/${tenantId}/authentication-policy`,
-      { headers: { authorization: `Bearer ${this.serviceToken}` } },
+      {
+        headers: {
+          ...(await this.headers(
+            "tenant.administrators.authenticate",
+            tenantId,
+          )),
+          "x-tenant-id": tenantId,
+        },
+      },
     );
     if (!response.ok)
       throw new ApiError(
@@ -230,7 +291,9 @@ export class HttpTenantAdminClient
   public async getPlatformAuthenticationPolicy(): Promise<TenantAuthenticationPolicy> {
     const response = await fetch(
       `${this.baseUrl}/internal/v1/platform/authentication-policy`,
-      { headers: { authorization: `Bearer ${this.serviceToken}` } },
+      {
+        headers: await this.headers("tenant.administrators.authenticate", null),
+      },
     );
     if (!response.ok)
       throw new ApiError(
@@ -255,7 +318,7 @@ export class HttpTenantAdminClient
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${this.serviceToken}`,
+        ...(await this.headers("tenant.approvals.consume", input.tenantId)),
         "content-type": "application/json",
         "idempotency-key": input.idempotencyKey,
         ...(input.tenantId ? { "x-tenant-id": input.tenantId } : {}),

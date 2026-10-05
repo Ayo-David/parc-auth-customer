@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import { ApiError } from "./api-error.js";
@@ -18,25 +17,10 @@ function header(
   return value;
 }
 
-function serviceAuthorized(
-  authorization: string | undefined,
-  expectedToken: string,
-): boolean {
-  const supplied = authorization?.startsWith("Bearer ")
-    ? authorization.slice(7)
-    : "";
-  const suppliedBuffer = Buffer.from(supplied);
-  const expectedBuffer = Buffer.from(expectedToken);
-  return (
-    suppliedBuffer.length === expectedBuffer.length &&
-    timingSafeEqual(suppliedBuffer, expectedBuffer)
-  );
-}
-
 export function createSessionRouter(
   sessions: SessionService,
   authenticate: RequestHandler,
-  internalServiceToken: string,
+  introspectionAccess: RequestHandler,
 ): Router {
   const router = Router();
   router.post("/v1/auth/token/refresh", async (request, response, next) => {
@@ -73,15 +57,9 @@ export function createSessionRouter(
   );
   router.post(
     "/internal/v1/tokens/introspect",
+    introspectionAccess,
     async (request, response, next) => {
       try {
-        if (
-          !serviceAuthorized(
-            request.header("authorization"),
-            internalServiceToken,
-          )
-        )
-          throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
         const input = introspectionSchema.parse(request.body);
         response
           .status(200)

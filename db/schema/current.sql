@@ -91,8 +91,16 @@ CREATE TYPE public.consent_type AS ENUM (
 CREATE TYPE public.credential_type AS ENUM (
     'PASSWORD',
     'PIN',
-    'PASSKEY'
+    'PASSKEY',
+    'LOGIN_PASSCODE'
 );
+
+
+--
+-- Name: TYPE credential_type; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TYPE public.credential_type IS 'PASSWORD and LOGIN_PASSCODE authenticate sessions; PIN authorizes financial transactions; PASSKEY is WebAuthn.';
 
 
 --
@@ -639,7 +647,10 @@ CREATE TABLE public.customer_addresses (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
     updated_by uuid,
-    deleted_at timestamp with time zone
+    deleted_at timestamp with time zone,
+    lga character varying(100),
+    area character varying(150),
+    landmark character varying(255)
 );
 
 ALTER TABLE ONLY public.customer_addresses FORCE ROW LEVEL SECURITY;
@@ -732,6 +743,38 @@ ALTER TABLE ONLY public.customer_merge_history FORCE ROW LEVEL SECURITY;
 
 
 --
+-- Name: customer_onboarding_sessions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.customer_onboarding_sessions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    customer_id uuid NOT NULL,
+    status character varying(30) DEFAULT 'IN_PROGRESS'::character varying NOT NULL,
+    current_step character varying(40) DEFAULT 'PHONE_VERIFICATION'::character varying NOT NULL,
+    completed_steps jsonb DEFAULT '[]'::jsonb NOT NULL,
+    onboarding_version character varying(30) DEFAULT 'mobile-v1'::character varying NOT NULL,
+    expires_at timestamp with time zone DEFAULT (now() + '30 days'::interval) NOT NULL,
+    completed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT customer_onboarding_completion_check CHECK (((((status)::text = 'COMPLETED'::text) AND (completed_at IS NOT NULL)) OR (((status)::text <> 'COMPLETED'::text) AND (completed_at IS NULL)))),
+    CONSTRAINT customer_onboarding_sessions_completed_steps_check CHECK ((jsonb_typeof(completed_steps) = 'array'::text)),
+    CONSTRAINT customer_onboarding_sessions_status_check CHECK (((status)::text = ANY (ARRAY[('IN_PROGRESS'::character varying)::text, ('COMPLETED'::character varying)::text, ('EXPIRED'::character varying)::text])))
+);
+
+ALTER TABLE ONLY public.customer_onboarding_sessions FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: TABLE customer_onboarding_sessions; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.customer_onboarding_sessions IS 'Durable, resumable customer onboarding progress; authoritative identity data remains in its owning tables.';
+
+
+--
 -- Name: customer_profiles; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -757,7 +800,9 @@ CREATE TABLE public.customer_profiles (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
     updated_by uuid,
-    deleted_at timestamp with time zone
+    deleted_at timestamp with time zone,
+    annual_income_band character varying(80),
+    has_other_income boolean
 );
 
 ALTER TABLE ONLY public.customer_profiles FORCE ROW LEVEL SECURITY;
@@ -1120,7 +1165,7 @@ CREATE TABLE public.notification_delivery_attempts (
     CONSTRAINT notification_delivery_attempts_attempt_number_check CHECK ((attempt_number > 0)),
     CONSTRAINT notification_delivery_attempts_check CHECK (((((status)::text = 'PROCESSING'::text) AND (completed_at IS NULL)) OR (((status)::text <> 'PROCESSING'::text) AND (completed_at IS NOT NULL)))),
     CONSTRAINT notification_delivery_attempts_check1 CHECK (((((status)::text = 'RETRYABLE'::text) AND (next_retry_at IS NOT NULL)) OR ((status)::text <> 'RETRYABLE'::text))),
-    CONSTRAINT notification_delivery_attempts_status_check CHECK (((status)::text = ANY ((ARRAY['PROCESSING'::character varying, 'SENT'::character varying, 'DELIVERED'::character varying, 'RETRYABLE'::character varying, 'FAILED'::character varying])::text[])))
+    CONSTRAINT notification_delivery_attempts_status_check CHECK (((status)::text = ANY (ARRAY[('PROCESSING'::character varying)::text, ('SENT'::character varying)::text, ('DELIVERED'::character varying)::text, ('RETRYABLE'::character varying)::text, ('FAILED'::character varying)::text])))
 );
 
 ALTER TABLE ONLY public.notification_delivery_attempts FORCE ROW LEVEL SECURITY;
@@ -1403,6 +1448,36 @@ ALTER TABLE ONLY public.risk_assessment_history FORCE ROW LEVEL SECURITY;
 
 
 --
+-- Name: transaction_authorizations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.transaction_authorizations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    customer_id uuid NOT NULL,
+    command_type character varying(80) NOT NULL,
+    resource_id uuid NOT NULL,
+    request_hash character(64) NOT NULL,
+    authorization_method character varying(30) NOT NULL,
+    token_hash character(64) NOT NULL,
+    issue_idempotency_key character varying(255) NOT NULL,
+    status character varying(20) DEFAULT 'ACTIVE'::character varying NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    consumed_at timestamp with time zone,
+    consumed_by_service character varying(100),
+    consumption_idempotency_key character varying(255),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT transaction_authorizations_authorization_method_check CHECK (((authorization_method)::text = ANY (ARRAY[('transaction_pin'::character varying)::text, ('biometric'::character varying)::text]))),
+    CONSTRAINT transaction_authorizations_check CHECK ((((status)::text = 'CONSUMED'::text) = (consumed_at IS NOT NULL))),
+    CONSTRAINT transaction_authorizations_check1 CHECK ((expires_at > created_at)),
+    CONSTRAINT transaction_authorizations_request_hash_check CHECK ((request_hash ~ '^[a-f0-9]{64}$'::text)),
+    CONSTRAINT transaction_authorizations_status_check CHECK (((status)::text = ANY (ARRAY[('ACTIVE'::character varying)::text, ('CONSUMED'::character varying)::text, ('REVOKED'::character varying)::text])))
+);
+
+ALTER TABLE ONLY public.transaction_authorizations FORCE ROW LEVEL SECURITY;
+
+
+--
 -- Name: user_2fa_methods; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1573,9 +1648,9 @@ CREATE TABLE public.user_passkeys (
     subject_type character varying(30) DEFAULT 'CUSTOMER'::character varying NOT NULL,
     scope_type character varying(20) DEFAULT 'TENANT'::character varying NOT NULL,
     CONSTRAINT passkey_sign_count_chk CHECK ((sign_count >= 0)),
-    CONSTRAINT user_passkeys_scope_type_check CHECK (((scope_type)::text = ANY ((ARRAY['TENANT'::character varying, 'PLATFORM'::character varying])::text[]))),
+    CONSTRAINT user_passkeys_scope_type_check CHECK (((scope_type)::text = ANY (ARRAY[('TENANT'::character varying)::text, ('PLATFORM'::character varying)::text]))),
     CONSTRAINT user_passkeys_subject_ownership_check CHECK (((((subject_type)::text = 'CUSTOMER'::text) AND ((scope_type)::text = 'TENANT'::text) AND (tenant_id IS NOT NULL) AND (user_id = subject_id)) OR (((subject_type)::text = 'ADMINISTRATOR'::text) AND (user_id IS NULL) AND ((((scope_type)::text = 'TENANT'::text) AND (tenant_id IS NOT NULL)) OR (((scope_type)::text = 'PLATFORM'::text) AND (tenant_id IS NULL)))))),
-    CONSTRAINT user_passkeys_subject_type_check CHECK (((subject_type)::text = ANY ((ARRAY['CUSTOMER'::character varying, 'ADMINISTRATOR'::character varying])::text[])))
+    CONSTRAINT user_passkeys_subject_type_check CHECK (((subject_type)::text = ANY (ARRAY[('CUSTOMER'::character varying)::text, ('ADMINISTRATOR'::character varying)::text])))
 );
 
 ALTER TABLE ONLY public.user_passkeys FORCE ROW LEVEL SECURITY;
@@ -1768,6 +1843,14 @@ ALTER TABLE ONLY public.customer_kyc_tiers
 
 ALTER TABLE ONLY public.customer_merge_history
     ADD CONSTRAINT customer_merge_history_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: customer_onboarding_sessions customer_onboarding_sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customer_onboarding_sessions
+    ADD CONSTRAINT customer_onboarding_sessions_pkey PRIMARY KEY (id);
 
 
 --
@@ -2016,6 +2099,30 @@ ALTER TABLE ONLY public.referrals
 
 ALTER TABLE ONLY public.risk_assessment_history
     ADD CONSTRAINT risk_assessment_history_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: transaction_authorizations transaction_authorizations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transaction_authorizations
+    ADD CONSTRAINT transaction_authorizations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: transaction_authorizations transaction_authorizations_tenant_id_issue_idempotency_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transaction_authorizations
+    ADD CONSTRAINT transaction_authorizations_tenant_id_issue_idempotency_key_key UNIQUE (tenant_id, issue_idempotency_key);
+
+
+--
+-- Name: transaction_authorizations transaction_authorizations_tenant_id_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transaction_authorizations
+    ADD CONSTRAINT transaction_authorizations_tenant_id_token_hash_key UNIQUE (tenant_id, token_hash);
 
 
 --
@@ -2353,6 +2460,13 @@ CREATE INDEX idx_customer_merge_target ON public.customer_merge_history USING bt
 
 
 --
+-- Name: idx_customer_onboarding_resume; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_customer_onboarding_resume ON public.customer_onboarding_sessions USING btree (tenant_id, user_id, updated_at DESC);
+
+
+--
 -- Name: idx_customer_profiles_name; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2682,6 +2796,13 @@ CREATE INDEX idx_risk_history_customer ON public.risk_assessment_history USING b
 
 
 --
+-- Name: idx_transaction_authorization_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_transaction_authorization_active ON public.transaction_authorizations USING btree (tenant_id, customer_id, expires_at) WHERE ((status)::text = 'ACTIVE'::text);
+
+
+--
 -- Name: idx_user_consents_document; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2794,6 +2915,13 @@ CREATE UNIQUE INDEX uq_customer_document_number ON public.customer_documents USI
 
 
 --
+-- Name: uq_customer_onboarding_active_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_customer_onboarding_active_user ON public.customer_onboarding_sessions USING btree (tenant_id, user_id) WHERE ((status)::text = 'IN_PROGRESS'::text);
+
+
+--
 -- Name: uq_notification_template; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2819,6 +2947,13 @@ CREATE UNIQUE INDEX uq_referral_referred_program ON public.referrals USING btree
 --
 
 CREATE UNIQUE INDEX uq_referral_reward_beneficiary_type ON public.referral_rewards USING btree (referral_id, beneficiary_user_id, reward_type);
+
+
+--
+-- Name: uq_transaction_authorization_consumption; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_transaction_authorization_consumption ON public.transaction_authorizations USING btree (tenant_id, consumption_idempotency_key) WHERE (consumption_idempotency_key IS NOT NULL);
 
 
 --
@@ -3015,6 +3150,27 @@ CREATE TRIGGER trg_customer_merge_history_target_customer_id_tenant_guard BEFORE
 --
 
 CREATE TRIGGER trg_customer_merge_history_target_user_id_tenant_guard BEFORE INSERT OR UPDATE OF tenant_id, target_user_id ON public.customer_merge_history FOR EACH ROW EXECUTE FUNCTION public.enforce_parent_tenant('users', 'id', 'target_user_id');
+
+
+--
+-- Name: customer_onboarding_sessions trg_customer_onboarding_customer_tenant_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_customer_onboarding_customer_tenant_guard BEFORE INSERT OR UPDATE OF tenant_id, customer_id ON public.customer_onboarding_sessions FOR EACH ROW EXECUTE FUNCTION public.enforce_parent_tenant('customer_profiles', 'id', 'customer_id');
+
+
+--
+-- Name: customer_onboarding_sessions trg_customer_onboarding_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_customer_onboarding_updated_at BEFORE UPDATE ON public.customer_onboarding_sessions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+--
+-- Name: customer_onboarding_sessions trg_customer_onboarding_user_tenant_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_customer_onboarding_user_tenant_guard BEFORE INSERT OR UPDATE OF tenant_id, user_id ON public.customer_onboarding_sessions FOR EACH ROW EXECUTE FUNCTION public.enforce_parent_tenant('users', 'id', 'user_id');
 
 
 --
@@ -3402,6 +3558,22 @@ ALTER TABLE ONLY public.customer_documents
 
 ALTER TABLE ONLY public.customer_kyc_tiers
     ADD CONSTRAINT customer_kyc_tiers_kyc_tier_version_id_fkey FOREIGN KEY (kyc_tier_version_id) REFERENCES public.kyc_tier_versions(id);
+
+
+--
+-- Name: customer_onboarding_sessions customer_onboarding_sessions_customer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customer_onboarding_sessions
+    ADD CONSTRAINT customer_onboarding_sessions_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer_profiles(id) ON DELETE CASCADE;
+
+
+--
+-- Name: customer_onboarding_sessions customer_onboarding_sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customer_onboarding_sessions
+    ADD CONSTRAINT customer_onboarding_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -3797,6 +3969,14 @@ ALTER TABLE ONLY public.notification_delivery_attempts
 
 
 --
+-- Name: transaction_authorizations transaction_authorizations_customer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transaction_authorizations
+    ADD CONSTRAINT transaction_authorizations_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer_profiles(id);
+
+
+--
 -- Name: user_sessions user_sessions_replaced_by_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3881,6 +4061,12 @@ ALTER TABLE public.customer_kyc_tiers ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.customer_merge_history ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: customer_onboarding_sessions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.customer_onboarding_sessions ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: customer_profiles; Type: ROW SECURITY; Schema: public; Owner: -
@@ -4138,6 +4324,13 @@ CREATE POLICY tenant_isolation_policy ON public.customer_merge_history TO parc_a
 
 
 --
+-- Name: customer_onboarding_sessions tenant_isolation_policy; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation_policy ON public.customer_onboarding_sessions TO parc_auth_customer_runtime, parc_auth_customer_worker, parc_auth_customer_readonly USING ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)) WITH CHECK ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid));
+
+
+--
 -- Name: customer_profiles tenant_isolation_policy; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -4306,6 +4499,13 @@ CREATE POLICY tenant_isolation_policy ON public.risk_assessment_history TO parc_
 
 
 --
+-- Name: transaction_authorizations tenant_isolation_policy; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation_policy ON public.transaction_authorizations TO parc_auth_customer_runtime, parc_auth_customer_worker, parc_auth_customer_readonly USING ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)) WITH CHECK ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid));
+
+
+--
 -- Name: user_2fa_methods tenant_isolation_policy; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -4362,6 +4562,12 @@ CREATE POLICY tenant_isolation_policy ON public.users TO parc_auth_customer_runt
 
 
 --
+-- Name: transaction_authorizations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.transaction_authorizations ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: user_2fa_methods; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4412,3 +4618,4 @@ ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 --
 -- PostgreSQL database dump complete
 --
+

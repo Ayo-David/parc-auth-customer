@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import type {
@@ -65,20 +64,10 @@ function header(
   return value;
 }
 
-function serviceAuthorized(
-  value: string | undefined,
-  expected: string,
-): boolean {
-  const token = value?.startsWith("Bearer ") ? value.slice(7) : "";
-  const left = Buffer.from(token);
-  const right = Buffer.from(expected);
-  return left.length === right.length && timingSafeEqual(left, right);
-}
-
 export function createPasskeyRouter(
   service: PasskeyService,
   authenticateCustomer: RequestHandler,
-  serviceToken: string,
+  administratorAccess: RequestHandler,
 ): Router {
   const router = Router();
   router.post(
@@ -187,10 +176,9 @@ export function createPasskeyRouter(
   );
   router.post(
     "/internal/v1/administrator-passkeys/registration/options",
+    administratorAccess,
     async (request, response, next) => {
       try {
-        if (!serviceAuthorized(request.header("authorization"), serviceToken))
-          throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
         header(request, "idempotency-key");
         const input = scopeSchema
           .and(
@@ -224,10 +212,9 @@ export function createPasskeyRouter(
   );
   router.post(
     "/internal/v1/administrator-passkeys/registration/verify",
+    administratorAccess,
     async (request, response, next) => {
       try {
-        if (!serviceAuthorized(request.header("authorization"), serviceToken))
-          throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
         header(request, "idempotency-key");
         const input = scopeSchema
           .and(
@@ -252,10 +239,9 @@ export function createPasskeyRouter(
   );
   router.post(
     "/internal/v1/administrator-passkeys/authentication/verify",
+    administratorAccess,
     async (request, response, next) => {
       try {
-        if (!serviceAuthorized(request.header("authorization"), serviceToken))
-          throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
         const input = scopeSchema
           .and(
             z.object({

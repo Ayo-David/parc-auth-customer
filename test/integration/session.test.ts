@@ -3,6 +3,7 @@ import { decodeJwt, SignJWT } from "jose";
 import knex, { type Knex } from "knex";
 import { withTenantTransaction } from "../../src/database/transaction.js";
 import { UserRepository } from "../../src/repositories/user-repository.js";
+import { CustomerRepository } from "../../src/repositories/customer-repository.js";
 import { createJwtKeyRing } from "../../src/security/jwt-key-ring.js";
 import { SessionService } from "../../src/services/session-service.js";
 
@@ -21,22 +22,34 @@ afterAll(async () => database.destroy());
 async function fixture(): Promise<{
   tenantId: string;
   userId: string;
+  customerId: string;
   sessions: SessionService;
   keys: Awaited<ReturnType<typeof createJwtKeyRing>>;
 }> {
   const tenantId = randomUUID();
-  const user = await withTenantTransaction(database, tenantId, (transaction) =>
-    new UserRepository(transaction).create({
-      tenantId,
-      phone: "+2348088888888",
-      phoneNormalized: "+2348088888888",
-      status: "ACTIVE",
-    }),
+  const { user, customer } = await withTenantTransaction(
+    database,
+    tenantId,
+    async (transaction) => {
+      const user = await new UserRepository(transaction).create({
+        tenantId,
+        phone: "+2348088888888",
+        phoneNormalized: "+2348088888888",
+        status: "ACTIVE",
+      });
+      const customer = await new CustomerRepository(transaction).create({
+        tenantId,
+        userId: user.id,
+        customerNumber: `CUS-${user.id.slice(0, 8)}`,
+      });
+      return { user, customer };
+    },
   );
   const keys = await createJwtKeyRing({ activeKid: "test-key" });
   return {
     tenantId,
     userId: user.id,
+    customerId: customer.id,
     keys,
     sessions: new SessionService(
       database,
@@ -53,6 +66,7 @@ async function cleanup(tenantId: string, userId: string): Promise<void> {
     .delete();
   await database("user_sessions").where({ tenant_id: tenantId }).delete();
   await database("user_devices").where({ tenant_id: tenantId }).delete();
+  await database("customer_profiles").where({ user_id: userId }).delete();
   await database("users").where({ id: userId }).delete();
 }
 
@@ -62,6 +76,7 @@ integrationTest(
     const {
       tenantId,
       userId,
+      customerId,
       sessions: oldIssuer,
       keys: oldKeys,
     } = await fixture();
@@ -88,7 +103,7 @@ integrationTest(
       "t".repeat(32),
     );
     await expect(verifier.verify(pair.access_token)).resolves.toMatchObject({
-      subject: userId,
+      subject: customerId,
     });
     await cleanup(tenantId, userId);
   },
@@ -97,7 +112,7 @@ integrationTest(
 integrationTest(
   "issues, verifies, introspects, refreshes, and logs out tokens",
   async () => {
-    const { tenantId, userId, sessions, keys } = await fixture();
+    const { tenantId, userId, customerId, sessions, keys } = await fixture();
     const first = await sessions.issue({
       tenantId,
       userId,
@@ -106,7 +121,7 @@ integrationTest(
       idempotencyKey: randomUUID(),
     });
     await expect(sessions.verify(first.access_token)).resolves.toMatchObject({
-      subject: userId,
+      subject: customerId,
       tenantId,
       audience: "mobile-bff",
     });
@@ -114,7 +129,7 @@ integrationTest(
       sessions.introspect(first.access_token),
     ).resolves.toMatchObject({
       active: true,
-      subject: userId,
+      subject: customerId,
     });
 
     const claims = decodeJwt(first.access_token);

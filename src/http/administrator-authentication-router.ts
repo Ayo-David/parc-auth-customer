@@ -1,5 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import { z } from "zod";
 import { ApiError } from "./api-error.js";
 import type { AdministratorAuthenticationService } from "../services/administrator-authentication-service.js";
@@ -41,14 +40,6 @@ const resetSchema = z
   })
   .strict();
 
-function authorize(value: string | undefined, expected: string): void {
-  const supplied = value?.startsWith("Bearer ") ? value.slice(7) : "";
-  const left = Buffer.from(supplied);
-  const right = Buffer.from(expected);
-  if (left.length !== right.length || !timingSafeEqual(left, right))
-    throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
-}
-
 function idempotencyKey(value: string | undefined): string {
   if (!value)
     throw new ApiError(400, "INVALID_REQUEST", "idempotency-key is required");
@@ -69,17 +60,14 @@ function validateScope(input: {
 
 export function createAdministratorAuthenticationRouter(
   service: AdministratorAuthenticationService,
-  serviceToken: string,
+  administratorAccess: RequestHandler,
 ): Router {
   const router = Router();
-  router.use("/internal/v1", (request, _response, next) => {
-    try {
-      authorize(request.header("authorization"), serviceToken);
-      next();
-    } catch (error) {
-      next(error);
-    }
-  });
+  for (const path of [
+    "/internal/v1/admin-authenticate",
+    "/internal/v1/administrator-mfa",
+  ])
+    router.use(path, administratorAccess);
   router.post(
     "/internal/v1/admin-authenticate",
     async (request, response, next) => {

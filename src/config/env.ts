@@ -20,10 +20,11 @@ const environmentSchema = z
       .string()
       .url()
       .default("http://localhost:3002"),
-    INTERNAL_SERVICE_TOKEN: z
-      .string()
-      .min(32)
-      .default("development-service-token-change-me"),
+    /**
+     * Registered service clients for `private_key_jwt`:
+     * `{ "<client-id>": { "<kid>": "<base64 SPKI PEM>" } }`. Public keys only.
+     */
+    SERVICE_CLIENT_KEYS_JSON: z.string().min(2).default("{}"),
     IDEMPOTENCY_HASH_SECRET: z
       .string()
       .min(32)
@@ -113,10 +114,9 @@ const environmentSchema = z
     },
   )
   .refine(
-    ({ NODE_ENV, INTERNAL_SERVICE_TOKEN }) =>
-      NODE_ENV !== "production" ||
-      INTERNAL_SERVICE_TOKEN !== "development-service-token-change-me",
-    { message: "Production requires INTERNAL_SERVICE_TOKEN" },
+    ({ NODE_ENV, SERVICE_CLIENT_KEYS_JSON }) =>
+      NODE_ENV !== "production" || SERVICE_CLIENT_KEYS_JSON.trim() !== "{}",
+    { message: "Production requires SERVICE_CLIENT_KEYS_JSON" },
   )
   .refine(
     ({ NODE_ENV, IDEMPOTENCY_HASH_SECRET }) =>

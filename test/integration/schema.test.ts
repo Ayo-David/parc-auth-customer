@@ -36,13 +36,14 @@ integrationTest("enforces approved Auth schema invariants", async () => {
     const required = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public' AND table_name IN
-         ('kyc_tier_versions', 'identity_verification_evidence', 'authentication_challenges', 'notification_delivery_attempts')`,
+         ('kyc_tier_versions', 'identity_verification_evidence', 'authentication_challenges', 'notification_delivery_attempts', 'transaction_authorizations')`,
     );
     expect(required.rows.map(({ table_name }) => table_name).sort()).toEqual([
       "authentication_challenges",
       "identity_verification_evidence",
       "kyc_tier_versions",
       "notification_delivery_attempts",
+      "transaction_authorizations",
     ]);
 
     const onboardingColumns = await pool.query<{
@@ -73,6 +74,38 @@ integrationTest("enforces approved Auth schema invariants", async () => {
         column_name: "consent_document_id",
         is_nullable: "NO",
       },
+    ]);
+
+    const mobileOnboarding = await pool.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'customer_onboarding_sessions'`,
+    );
+    expect(mobileOnboarding.rows).toEqual([
+      { table_name: "customer_onboarding_sessions" },
+    ]);
+    const credentialTypes = await pool.query<{ enumlabel: string }>(
+      `SELECT e.enumlabel FROM pg_enum e
+       JOIN pg_type t ON t.oid = e.enumtypid
+       WHERE t.typname = 'credential_type' ORDER BY e.enumsortorder`,
+    );
+    expect(credentialTypes.rows.map(({ enumlabel }) => enumlabel)).toContain(
+      "LOGIN_PASSCODE",
+    );
+    const structuredFields = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND (
+         (table_name = 'customer_addresses' AND column_name IN ('lga', 'area', 'landmark')) OR
+         (table_name = 'customer_profiles' AND column_name IN ('annual_income_band', 'has_other_income'))
+       )`,
+    );
+    expect(
+      structuredFields.rows.map(({ column_name }) => column_name).sort(),
+    ).toEqual([
+      "annual_income_band",
+      "area",
+      "has_other_income",
+      "landmark",
+      "lga",
     ]);
 
     const roles = await pool.query<{

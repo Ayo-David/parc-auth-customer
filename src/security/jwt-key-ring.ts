@@ -1,4 +1,4 @@
-import { generateKeyPair, importPKCS8, importSPKI } from "jose";
+import { exportJWK, generateKeyPair, importPKCS8, importSPKI } from "jose";
 
 type PrivateJwtKey = Awaited<ReturnType<typeof importPKCS8>>;
 type PublicJwtKey = Awaited<ReturnType<typeof importSPKI>>;
@@ -7,6 +7,21 @@ export interface JwtKeyRing {
   activeKid: string;
   privateKey: PrivateJwtKey;
   publicKeys: ReadonlyMap<string, PublicJwtKey>;
+}
+
+export async function publicJwks(
+  keyRing: JwtKeyRing,
+): Promise<{ keys: object[] }> {
+  return {
+    keys: await Promise.all(
+      [...keyRing.publicKeys].map(async ([kid, key]) => ({
+        ...(await exportJWK(key)),
+        kid,
+        use: "sig",
+        alg: "RS256",
+      })),
+    ),
+  };
 }
 
 export async function createJwtKeyRing(input: {

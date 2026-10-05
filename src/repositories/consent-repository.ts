@@ -37,11 +37,15 @@ export class ConsentRepository {
   }): Promise<boolean> {
     const record = await this.transaction("user_consents")
       .where({
-        id: input.consentId,
         user_id: input.userId,
         consent_type: "KYC",
         granted: true,
       })
+      .andWhere((query) =>
+        query
+          .where("id", input.consentId)
+          .orWhere("consent_document_id", input.consentId),
+      )
       .whereNull("withdrawn_at")
       .whereNull("deleted_at")
       .first("id");

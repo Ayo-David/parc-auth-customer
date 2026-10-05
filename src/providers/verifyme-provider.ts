@@ -21,6 +21,17 @@ const verifyMeResponseSchema = z
   })
   .passthrough();
 
+const livenessResponseSchema = z
+  .object({
+    isLive: z.boolean(),
+    identityMatches: z.boolean(),
+    identityDetails: z
+      .object({ idNumber: z.string().optional() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 export interface VerifyMeProviderOptions {
   baseUrl: string;
   apiKey: string;
@@ -97,6 +108,70 @@ export class VerifyMeProvider implements KycProvider {
           providerConfigurationVersion: this.options.configurationVersion,
           resultCode: parsed.code ?? `HTTP_${String(response.status)}`,
           safeResult: { status: "failed" },
+        };
+      return this.pending(fallbackReference, `HTTP_${String(response.status)}`);
+    } catch {
+      return this.pending(fallbackReference, "PROVIDER_OUTCOME_UNKNOWN");
+    }
+  }
+
+  public async verifyBiometric(input: {
+    verificationId: string;
+    identityType: KycIdentityType;
+    identityValue: string;
+    livenessReference: string;
+  }): Promise<KycProviderResult> {
+    const fallbackReference = `verifyme-biometric:${input.verificationId}`;
+    try {
+      const response = await this.fetchImplementation(
+        `${this.options.baseUrl}/v1/verifications/liveness/${encodeURIComponent(input.livenessReference)}`,
+        {
+          method: "GET",
+          headers: {
+            authorization: `Bearer ${this.options.apiKey}`,
+            "x-correlation-id": input.verificationId,
+          },
+          signal: AbortSignal.timeout(this.options.timeoutMs),
+        },
+      );
+      const payload = livenessResponseSchema.safeParse(
+        await response.json().catch(() => ({})),
+      );
+      const parsed: z.infer<typeof livenessResponseSchema> | undefined =
+        payload.success ? payload.data : undefined;
+      const providerReference = input.livenessReference;
+      // The face must match the identity being verified, not whichever one the
+      // client bound to the liveness session.
+      const identityConfirmed =
+        parsed?.identityDetails?.idNumber === input.identityValue;
+      if (
+        response.ok &&
+        parsed?.isLive &&
+        parsed.identityMatches &&
+        identityConfirmed
+      )
+        return {
+          outcome: "VERIFIED",
+          providerReference,
+          providerConfigurationVersion: this.options.configurationVersion,
+          resultCode: "LIVENESS_AND_FACE_MATCHED",
+          safeResult: {
+            status: "success",
+            liveness_verified: true,
+            face_matched: true,
+          },
+        };
+      if (response.ok || response.status === 400)
+        return {
+          outcome: "FAILED",
+          providerReference,
+          providerConfigurationVersion: this.options.configurationVersion,
+          resultCode: "LIVENESS_OR_FACE_NOT_MATCHED",
+          safeResult: {
+            status: "failed",
+            liveness_verified: parsed?.isLive === true,
+            face_matched: parsed?.identityMatches === true && identityConfirmed,
+          },
         };
       return this.pending(fallbackReference, `HTTP_${String(response.status)}`);
     } catch {

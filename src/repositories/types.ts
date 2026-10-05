@@ -1,6 +1,6 @@
 export type UserStatus =
   "PENDING" | "ACTIVE" | "SUSPENDED" | "BLOCKED" | "DEACTIVATED";
-export type CredentialType = "PASSWORD" | "PIN" | "PASSKEY";
+export type CredentialType = "PASSWORD" | "LOGIN_PASSCODE" | "PIN" | "PASSKEY";
 
 export interface UserRecord {
   id: string;

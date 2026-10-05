@@ -59,7 +59,6 @@ integrationTest(
     expect(first.first_name).toBeUndefined();
     expect(first.last_name).toBeUndefined();
 
-    const user = await database("users").where({ tenant_id: tenantId }).first();
     const profile = await database("customer_profiles")
       .where({ tenant_id: tenantId })
       .first();
@@ -80,7 +79,7 @@ integrationTest(
         .count("* as count"),
     ).toEqual([{ count: "1" }]);
 
-    const updated = await service.update(tenantId, user.id, randomUUID(), {
+    const updated = await service.update(tenantId, profile.id, randomUUID(), {
       firstName: "Ada",
       lastName: "Okafor",
       email: "ADA@EXAMPLE.COM",

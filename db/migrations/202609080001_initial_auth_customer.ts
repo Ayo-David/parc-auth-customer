@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { Knex } from "knex";
@@ -5,6 +6,8 @@ import type { Knex } from "knex";
 export const config = { transaction: false };
 const approvedExistingBaselineHash =
   "fc648c48a8f623db1c73fd424892f1deabf0e96581d5fdb548cdf2c7eaf75eec";
+const canonicalSnapshotHash =
+  "31126a8bac52797c50d7f2f606ecadb888edc66376ef7f7fe2aea02f003bfa30";
 
 export async function up(knex: Knex): Promise<void> {
   if (await knex.schema.hasTable("users")) {
@@ -28,7 +31,14 @@ export async function up(knex: Knex): Promise<void> {
   const snapshot = fileURLToPath(
     new URL("../schema/current.sql", import.meta.url),
   );
-  await knex.raw(await readFile(snapshot, "utf8"));
+  const sql = await readFile(snapshot, "utf8");
+  const actualHash = createHash("sha256").update(sql).digest("hex");
+  if (actualHash !== canonicalSnapshotHash) {
+    throw new Error(
+      `Auth & Customer schema snapshot hash mismatch: ${actualHash}`,
+    );
+  }
+  await knex.raw(sql);
   await knex.raw("SET search_path TO public");
   await knex.raw(`
     GRANT USAGE ON SCHEMA public TO parc_auth_customer_runtime, parc_auth_customer_worker, parc_auth_customer_readonly;

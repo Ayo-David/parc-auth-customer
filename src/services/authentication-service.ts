@@ -167,6 +167,80 @@ export class AuthenticationService {
     });
   }
 
+  public async loginWithPasscode(input: {
+    tenantId: string;
+    idempotencyKey: string;
+    identifier: string;
+    passcode: string;
+    deviceId: string;
+  }): Promise<object> {
+    const identifier = input.identifier.trim().toLowerCase();
+    if (
+      !(await this.rateLimiter.consume(
+        `auth:passcode:${input.tenantId}:${identifier}`,
+        5,
+        15 * 60,
+      ))
+    )
+      throw new ApiError(
+        429,
+        "RATE_LIMITED",
+        "Too many authentication attempts",
+      );
+    const userId = await withTenantTransaction(
+      this.database,
+      input.tenantId,
+      async (transaction) => {
+        const user = await new UserRepository(
+          transaction,
+        ).findByCanonicalIdentifier(input.tenantId, identifier);
+        const repository = new CredentialRepository(transaction);
+        const credential = user
+          ? await repository.findActive(user.id, "LOGIN_PASSCODE")
+          : undefined;
+        const valid = await argon2.verify(
+          credential?.credential_hash ?? (await dummyHash),
+          input.passcode,
+        );
+        if (
+          !user ||
+          !credential ||
+          !valid ||
+          !["ACTIVE", "PENDING"].includes(user.status) ||
+          isUserLocked(user)
+        ) {
+          if (user && !isUserLocked(user))
+            await new AuthenticationRepository(transaction).recordLoginFailure(
+              user.id,
+              5,
+              15,
+            );
+          return undefined;
+        }
+        await new AuthenticationRepository(transaction).recordLoginSuccess(
+          user.id,
+        );
+        await repository.touchLastUsed(credential.id);
+        return user.id;
+      },
+    );
+    if (!userId)
+      throw new ApiError(401, "AUTHENTICATION_FAILED", "Authentication failed");
+    const mfa = await this.customerMfa?.challenge({
+      tenantId: input.tenantId,
+      userId,
+      deviceId: input.deviceId,
+    });
+    if (mfa) return mfa;
+    return this.issuer.issue({
+      tenantId: input.tenantId,
+      userId,
+      deviceId: input.deviceId,
+      authenticationMethods: ["LOGIN_PASSCODE"],
+      idempotencyKey: input.idempotencyKey,
+    });
+  }
+
   public startPinSetup(
     tenantId: string,
     userId: string,

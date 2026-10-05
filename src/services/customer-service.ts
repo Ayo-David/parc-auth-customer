@@ -208,16 +208,18 @@ export class CustomerService {
     }
   }
 
-  public get(tenantId: string, userId: string): Promise<CustomerView> {
+  public get(tenantId: string, customerId: string): Promise<CustomerView> {
     return withTenantTransaction(
       this.database,
       tenantId,
       async (transaction) => {
-        const user = await new UserRepository(transaction).findById(userId);
-        const profile = await new CustomerRepository(transaction).findByUserId(
-          userId,
+        const profile = await new CustomerRepository(transaction).findById(
+          customerId,
         );
-        if (!user || !profile)
+        const user = profile
+          ? await new UserRepository(transaction).findById(profile.user_id)
+          : undefined;
+        if (!profile || !user)
           throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
         return toView(user, profile);
       },
@@ -226,7 +228,7 @@ export class CustomerService {
 
   public update(
     tenantId: string,
-    userId: string,
+    customerId: string,
     idempotencyKey: string,
     input: { firstName?: string; lastName?: string; email?: string },
   ): Promise<CustomerView> {
@@ -242,7 +244,7 @@ export class CustomerService {
         : {}),
     };
     const requestHash = createHmac("sha256", this.idempotencySecret)
-      .update(JSON.stringify({ userId, ...normalized }))
+      .update(JSON.stringify({ customerId, ...normalized }))
       .digest("hex");
     return withTenantTransaction(
       this.database,
@@ -266,19 +268,18 @@ export class CustomerService {
           );
         }
         const users = new UserRepository(transaction);
-        let user = await users.findById(userId);
-        if (!user)
+        const customers = new CustomerRepository(transaction);
+        let profile = await customers.findById(customerId);
+        let user = profile ? await users.findById(profile.user_id) : undefined;
+        if (!profile || !user)
           throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
         if (normalized.email !== undefined)
           user = await users.updateEmail({
-            id: userId,
+            id: profile.user_id,
             email: normalized.email,
             emailNormalized: normalized.email,
           });
-        const profile = await new CustomerRepository(transaction).update(
-          userId,
-          normalized,
-        );
+        profile = await customers.update(profile.user_id, normalized);
         const response = toView(user, profile);
         await idempotency.complete({
           tenantId,

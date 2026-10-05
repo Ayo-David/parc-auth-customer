@@ -23,6 +23,7 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "db/migrations/**/*.ts",
+    "scripts/**/*.ts",
     "knexfile.ts"
   ]
 }

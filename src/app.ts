@@ -25,6 +25,37 @@ import type { PasskeyService } from "./services/passkey-service.js";
 import { createPasskeyRouter } from "./http/passkey-router.js";
 import type { KycService } from "./services/kyc-service.js";
 import { createKycRouter } from "./http/kyc-router.js";
+import { createTransactionAuthorizationRouter } from "./http/transaction-authorization-router.js";
+import type { TransactionAuthorizationService } from "./services/transaction-authorization-service.js";
+import type { CustomerExperienceService } from "./services/customer-experience-service.js";
+import { createCustomerExperienceRouter } from "./http/customer-experience-router.js";
+import type { OnboardingService } from "./services/onboarding-service.js";
+import { createOnboardingRouter } from "./http/onboarding-router.js";
+import { createLendingEligibilityRouter } from "./http/lending-eligibility-router.js";
+import type { LendingEligibilityService } from "./services/lending-eligibility-service.js";
+import type { AccessPolicy, ParcAuth } from "./security/parc-service-auth.js";
+import { createOAuthTokenRouter } from "./http/oauth-token-router.js";
+import type { ClientAssertionVerifier } from "./security/client-assertion-verifier.js";
+import type { ServiceTokenService } from "./services/service-token-service.js";
+
+/** Endpoint permissions for Auth's internal service routes. */
+export const internalAccessPolicies = {
+  introspection: { scopes: ["auth.tokens.introspect"], kinds: ["service"] },
+  administrator: {
+    scopes: ["auth.administrator-authentication"],
+    kinds: ["service"],
+    actors: ["parc-admin-bff"],
+  },
+  transactionAuthorization: {
+    scopes: ["auth.transaction-authorizations.consume"],
+    kinds: ["delegated"],
+    subjectTypes: ["CUSTOMER"],
+  },
+  lendingEligibility: {
+    scopes: ["auth.lending-eligibility.read"],
+    actors: ["parc-lending"],
+  },
+} satisfies Record<string, AccessPolicy>;
 
 export interface AppDependencies {
   config: AppConfig;
@@ -39,6 +70,16 @@ export interface AppDependencies {
   customerMfaService?: CustomerMfaService;
   passkeyService?: PasskeyService;
   kycService?: KycService;
+  transactionAuthorizationService?: TransactionAuthorizationService;
+  customerExperienceService?: CustomerExperienceService;
+  onboardingService?: OnboardingService;
+  lendingEligibilityService?: LendingEligibilityService;
+  jwks?: { keys: object[] };
+  serviceAuth?: ParcAuth;
+  serviceTokens?: {
+    clients: ClientAssertionVerifier;
+    tokens: ServiceTokenService;
+  };
 }
 
 export function createApp({
@@ -54,7 +95,22 @@ export function createApp({
   customerMfaService,
   passkeyService,
   kycService,
+  transactionAuthorizationService,
+  customerExperienceService,
+  onboardingService,
+  lendingEligibilityService,
+  jwks,
+  serviceAuth,
+  serviceTokens,
 }: AppDependencies): Express {
+  const access = (policy: AccessPolicy): RequestHandler =>
+    serviceAuth
+      ? serviceAuth.require(policy)
+      : (_request, response) => {
+          response
+            .status(401)
+            .json({ code: "UNAUTHORIZED", message: "Authentication failed" });
+        };
   const app = express();
   app.disable("x-powered-by");
   app.use(helmet());
@@ -93,6 +149,17 @@ export function createApp({
     }
   });
 
+  if (jwks)
+    app.get("/.well-known/jwks.json", (_request, response) => {
+      response.setHeader("cache-control", "public, max-age=300");
+      response.status(200).json(jwks);
+    });
+
+  if (serviceTokens)
+    app.use(
+      createOAuthTokenRouter(serviceTokens.clients, serviceTokens.tokens),
+    );
+
   if (customerService && accessTokenVerifier)
     app.use(
       createCustomerRouter(
@@ -114,14 +181,14 @@ export function createApp({
       createSessionRouter(
         sessionService,
         customerAuthentication(accessTokenVerifier),
-        config.INTERNAL_SERVICE_TOKEN,
+        access(internalAccessPolicies.introspection),
       ),
     );
   if (administratorAuthenticationService)
     app.use(
       createAdministratorAuthenticationRouter(
         administratorAuthenticationService,
-        config.INTERNAL_SERVICE_TOKEN,
+        access(internalAccessPolicies.administrator),
       ),
     );
   if (passkeyService && accessTokenVerifier)
@@ -129,12 +196,43 @@ export function createApp({
       createPasskeyRouter(
         passkeyService,
         customerAuthentication(accessTokenVerifier),
-        config.INTERNAL_SERVICE_TOKEN,
+        access(internalAccessPolicies.administrator),
       ),
     );
   if (kycService && accessTokenVerifier)
     app.use(
       createKycRouter(kycService, customerAuthentication(accessTokenVerifier)),
+    );
+  if (transactionAuthorizationService && accessTokenVerifier)
+    app.use(
+      createTransactionAuthorizationRouter(
+        transactionAuthorizationService,
+        customerAuthentication(accessTokenVerifier),
+        access(internalAccessPolicies.transactionAuthorization),
+      ),
+    );
+  if (customerExperienceService && accessTokenVerifier)
+    app.use(
+      createCustomerExperienceRouter(
+        customerExperienceService,
+        customerAuthentication(accessTokenVerifier),
+      ),
+    );
+  if (onboardingService && otpService && kycService && accessTokenVerifier)
+    app.use(
+      createOnboardingRouter(
+        onboardingService,
+        otpService,
+        kycService,
+        customerAuthentication(accessTokenVerifier),
+      ),
+    );
+  if (lendingEligibilityService)
+    app.use(
+      createLendingEligibilityRouter(
+        lendingEligibilityService,
+        access(internalAccessPolicies.lendingEligibility),
+      ),
     );
 
   app.use((_request, response) => {

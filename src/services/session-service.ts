@@ -16,6 +16,7 @@ import type {
 import type { JwtKeyRing } from "../security/jwt-key-ring.js";
 import type { AuthResultIssuer } from "./authentication-service.js";
 import type { AdministratorTenantAdminClient } from "./tenant-admin-client.js";
+import { CustomerRepository } from "../repositories/customer-repository.js";
 
 export interface TokenPair {
   access_token: string;
@@ -71,11 +72,18 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
             input.userId,
             input.deviceId,
           );
+        const customer = await new CustomerRepository(transaction).findByUserId(
+          input.userId,
+        );
+        if (!customer)
+          throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
         const refreshToken = randomBytes(48).toString("base64url");
         const jti = randomUUID();
         const session = await new SessionRepository(transaction).create({
           tenantId: input.tenantId,
           userId: input.userId,
+          // The current database constraint records the owning Auth user here.
+          // The externally visible JWT subject is the customer profile ID.
           subjectId: input.userId,
           sessionTokenHash: this.hash(jti),
           refreshTokenHash: this.hash(refreshToken),
@@ -89,7 +97,7 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
           idleExpiresAt: new Date(Date.now() + this.idleTtlMs),
           ...(input.deviceId ? { deviceId: input.deviceId } : {}),
         });
-        return this.pair(session, jti, refreshToken);
+        return this.pair(session, jti, refreshToken, customer.id);
       },
     );
   }
@@ -152,9 +160,24 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
           ...(current.device_id ? { deviceId: current.device_id } : {}),
         });
         await sessions.replace(current.id, successor.id);
+        const publicSubject =
+          current.subject_type === "CUSTOMER" && current.user_id
+            ? (
+                await new CustomerRepository(transaction).findByUserId(
+                  current.user_id,
+                )
+              )?.id
+            : current.subject_id;
+        if (!publicSubject)
+          throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
         return {
           state: "ROTATED" as const,
-          pair: await this.pair(successor, jti, nextRefreshToken),
+          pair: await this.pair(
+            successor,
+            jti,
+            nextRefreshToken,
+            publicSubject,
+          ),
         };
       },
     );
@@ -200,8 +223,14 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
           claims.tenant_id,
           claims.session_id,
         );
+        const customer = session?.user_id
+          ? await new CustomerRepository(transaction).findByUserId(
+              session.user_id,
+            )
+          : undefined;
         return Boolean(
           session &&
+          customer?.id === claims.sub &&
           !session.revoked_at &&
           session.expires_at.getTime() > Date.now() &&
           (!session.idle_expires_at ||
@@ -304,16 +333,28 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
         (claims.scope === "PLATFORM" && claims.tenant_id !== null)
       )
         return { active: false };
-      const session = await withAuthScopeTransaction(
+      const resolved = await withAuthScopeTransaction(
         this.database,
         claims.tenant_id,
         claims.scope,
-        (transaction) =>
-          new SessionRepository(transaction).findById(
+        async (transaction) => {
+          const session = await new SessionRepository(transaction).findById(
             claims.tenant_id,
             claims.session_id,
-          ),
+          );
+          if (!session) return undefined;
+          const publicSubject =
+            session.subject_type === "CUSTOMER" && session.user_id
+              ? (
+                  await new CustomerRepository(transaction).findByUserId(
+                    session.user_id,
+                  )
+                )?.id
+              : session.subject_id;
+          return { session, publicSubject };
+        },
       );
+      const session = resolved?.session;
       if (
         !session ||
         session.revoked_at ||
@@ -321,7 +362,7 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
         (session.idle_expires_at &&
           session.idle_expires_at.getTime() <= Date.now()) ||
         session.session_token_hash !== this.hash(claims.jti) ||
-        session.subject_id !== claims.sub ||
+        resolved.publicSubject !== claims.sub ||
         session.subject_type !== claims.subject_type
       )
         return { active: false };
@@ -357,10 +398,57 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
     }
   }
 
+  /**
+   * Confirms that the session behind a delegated token is still live and still
+   * belongs to the token subject. Used when a delegated token is exchanged
+   * again further down a service chain.
+   */
+  public async sessionActive(input: {
+    tenantId: string | null;
+    scope: "TENANT" | "PLATFORM";
+    sessionId: string;
+    subjectId: string;
+    subjectType: "CUSTOMER" | "ADMINISTRATOR";
+  }): Promise<boolean> {
+    const resolved = await withAuthScopeTransaction(
+      this.database,
+      input.tenantId,
+      input.scope,
+      async (transaction) => {
+        const session = await new SessionRepository(transaction).findById(
+          input.tenantId,
+          input.sessionId,
+        );
+        if (!session) return undefined;
+        const publicSubject =
+          session.subject_type === "CUSTOMER" && session.user_id
+            ? (
+                await new CustomerRepository(transaction).findByUserId(
+                  session.user_id,
+                )
+              )?.id
+            : session.subject_id;
+        return { session, publicSubject };
+      },
+    );
+    const session = resolved?.session;
+    return Boolean(
+      session &&
+      !session.revoked_at &&
+      session.expires_at.getTime() > Date.now() &&
+      (!session.idle_expires_at ||
+        session.idle_expires_at.getTime() > Date.now()) &&
+      session.subject_type === input.subjectType &&
+      session.scope_type === input.scope &&
+      resolved.publicSubject === input.subjectId,
+    );
+  }
+
   private async pair(
     session: Awaited<ReturnType<SessionRepository["create"]>>,
     jti: string,
     refreshToken: string,
+    publicSubject = session.subject_id,
   ): Promise<TokenPair> {
     const accessToken = await new SignJWT({
       tenant_id: session.tenant_id,
@@ -377,7 +465,7 @@ export class SessionService implements AuthResultIssuer, AccessTokenVerifier {
       })
       .setIssuer(this.issuer)
       .setAudience(session.audience)
-      .setSubject(session.subject_id)
+      .setSubject(publicSubject)
       .setJti(jti)
       .setIssuedAt()
       .setExpirationTime(

@@ -20,6 +20,12 @@ export interface KycProvider {
     firstName?: string;
     lastName?: string;
   }): Promise<KycProviderResult>;
+  verifyBiometric(input: {
+    verificationId: string;
+    identityType: KycIdentityType;
+    identityValue: string;
+    livenessReference: string;
+  }): Promise<KycProviderResult>;
 }
 
 export interface KycProviderResolver {
