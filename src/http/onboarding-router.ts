@@ -33,6 +33,16 @@ export function createOnboardingRouter(
   authenticate: RequestHandler,
 ): Router {
   const router = Router();
+  const resolve = async (customer?: AuthenticatedCustomer) => {
+    const subject = identity(customer);
+    return {
+      tenantId: subject.tenantId,
+      userId: await onboarding.userIdForCustomer(
+        subject.tenantId,
+        subject.subject,
+      ),
+    };
+  };
   router.post(
     "/v1/onboarding/registrations",
     async (request, response, next) => {
@@ -106,9 +116,9 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         response.json(
-          await onboarding.status(subject.tenantId, subject.subject),
+          await onboarding.status(subject.tenantId, subject.userId),
         );
       } catch (error) {
         next(error);
@@ -120,7 +130,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             email: z.string().email().optional(),
@@ -131,7 +141,7 @@ export function createOnboardingRouter(
           .parse(request.body);
         const state = await onboarding.updateEmail(
           subject.tenantId,
-          subject.subject,
+          subject.userId,
           input.email?.toLowerCase(),
         );
         const challenge = input.email
@@ -157,7 +167,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             challenge_id: z.string().uuid(),
@@ -172,7 +182,7 @@ export function createOnboardingRouter(
           code: input.code,
         });
         response.json(
-          await onboarding.markEmailVerified(subject.tenantId, subject.subject),
+          await onboarding.markEmailVerified(subject.tenantId, subject.userId),
         );
       } catch (error) {
         next(error);
@@ -184,7 +194,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             identity_type: z.literal("NIN"),
@@ -195,7 +205,7 @@ export function createOnboardingRouter(
           .parse(request.body);
         const result = await kyc.start({
           tenantId: subject.tenantId,
-          userId: subject.subject,
+          userId: subject.userId,
           identityType: input.identity_type,
           identityValue: input.identity_value,
           consentId: input.consent_id,
@@ -210,10 +220,10 @@ export function createOnboardingRouter(
           result.status === "VERIFIED"
             ? await onboarding.markIdentity(
                 subject.tenantId,
-                subject.subject,
+                subject.userId,
                 true,
               )
-            : await onboarding.status(subject.tenantId, subject.subject);
+            : await onboarding.status(subject.tenantId, subject.userId);
         response.status(202).json({ verification: result, onboarding: state });
       } catch (error) {
         next(error);
@@ -225,7 +235,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             identity_type: z.literal("NIN"),
@@ -237,7 +247,7 @@ export function createOnboardingRouter(
           .parse(request.body);
         const result = await kyc.startBiometric({
           tenantId: subject.tenantId,
-          userId: subject.subject,
+          userId: subject.userId,
           identityType: input.identity_type,
           identityValue: input.identity_value,
           livenessReference: input.liveness_reference,
@@ -253,9 +263,9 @@ export function createOnboardingRouter(
           result.status === "VERIFIED"
             ? await onboarding.markFaceVerified(
                 subject.tenantId,
-                subject.subject,
+                subject.userId,
               )
-            : await onboarding.status(subject.tenantId, subject.subject);
+            : await onboarding.status(subject.tenantId, subject.userId);
         response.status(202).json({ verification: result, onboarding: state });
       } catch (error) {
         next(error);
@@ -267,7 +277,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({ verification_id: z.string().uuid() })
           .strict()
@@ -275,7 +285,7 @@ export function createOnboardingRouter(
         response.json(
           await onboarding.confirmFaceVerification(
             subject.tenantId,
-            subject.subject,
+            subject.userId,
             input.verification_id,
           ),
         );
@@ -289,7 +299,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             state: z.string().min(2).max(100),
@@ -303,7 +313,7 @@ export function createOnboardingRouter(
         response.json(
           await onboarding.updateAddress(
             subject.tenantId,
-            subject.subject,
+            subject.userId,
             input,
           ),
         );
@@ -317,7 +327,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({ politically_exposed_person: z.boolean() })
           .strict()
@@ -325,7 +335,7 @@ export function createOnboardingRouter(
         response.json(
           await onboarding.updateCompliance(
             subject.tenantId,
-            subject.subject,
+            subject.userId,
             input.politically_exposed_person,
           ),
         );
@@ -339,7 +349,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             occupation: z.string().min(2).max(150),
@@ -349,7 +359,7 @@ export function createOnboardingRouter(
           .strict()
           .parse(request.body);
         response.json(
-          await onboarding.updateIncome(subject.tenantId, subject.subject, {
+          await onboarding.updateIncome(subject.tenantId, subject.userId, {
             occupation: input.occupation,
             annualIncomeBand: input.annual_income_band,
             hasOtherIncome: input.has_other_income,
@@ -365,7 +375,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
             passcode: z.string().regex(/^[0-9]{6}$/),
@@ -380,7 +390,7 @@ export function createOnboardingRouter(
         response.json(
           await onboarding.setLoginPasscode(
             subject.tenantId,
-            subject.subject,
+            subject.userId,
             input.passcode,
           ),
         );
@@ -394,7 +404,7 @@ export function createOnboardingRouter(
     authenticate,
     async (request, response, next) => {
       try {
-        const subject = identity(request.authenticatedCustomer);
+        const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({ biometric_enrolled: z.boolean() })
           .strict()
@@ -402,7 +412,7 @@ export function createOnboardingRouter(
         response.json(
           await onboarding.completeBiometric(
             subject.tenantId,
-            subject.subject,
+            subject.userId,
             input.biometric_enrolled,
           ),
         );

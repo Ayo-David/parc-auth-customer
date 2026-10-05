@@ -25,6 +25,10 @@ const livenessResponseSchema = z
   .object({
     isLive: z.boolean(),
     identityMatches: z.boolean(),
+    identityDetails: z
+      .object({ idNumber: z.string().optional() })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -136,7 +140,16 @@ export class VerifyMeProvider implements KycProvider {
       const parsed: z.infer<typeof livenessResponseSchema> | undefined =
         payload.success ? payload.data : undefined;
       const providerReference = input.livenessReference;
-      if (response.ok && parsed?.isLive && parsed.identityMatches)
+      // The face must match the identity being verified, not whichever one the
+      // client bound to the liveness session.
+      const identityConfirmed =
+        parsed?.identityDetails?.idNumber === input.identityValue;
+      if (
+        response.ok &&
+        parsed?.isLive &&
+        parsed.identityMatches &&
+        identityConfirmed
+      )
         return {
           outcome: "VERIFIED",
           providerReference,
@@ -157,7 +170,7 @@ export class VerifyMeProvider implements KycProvider {
           safeResult: {
             status: "failed",
             liveness_verified: parsed?.isLive === true,
-            face_matched: parsed?.identityMatches === true,
+            face_matched: parsed?.identityMatches === true && identityConfirmed,
           },
         };
       return this.pending(fallbackReference, `HTTP_${String(response.status)}`);

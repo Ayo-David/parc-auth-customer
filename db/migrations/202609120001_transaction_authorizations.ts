@@ -6,7 +6,7 @@ export async function up(knex: Knex): Promise<void> {
     CREATE TABLE transaction_authorizations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       tenant_id uuid NOT NULL,
-      customer_id uuid NOT NULL REFERENCES users(id),
+      customer_id uuid NOT NULL REFERENCES customer_profiles(id),
       command_type varchar(80) NOT NULL,
       resource_id uuid NOT NULL,
       request_hash char(64) NOT NULL CHECK (request_hash ~ '^[a-f0-9]{64}$'),

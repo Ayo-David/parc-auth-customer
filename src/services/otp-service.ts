@@ -248,6 +248,7 @@ export class OtpService {
         "Too many authentication attempts",
       );
     const code = await this.secrets.take(input.challengeId);
+    let challengeExpiresAt: Date | undefined;
     const changed = await withTenantTransaction(
       this.database,
       input.tenantId,
@@ -294,6 +295,7 @@ export class OtpService {
             );
           return false;
         }
+        challengeExpiresAt = challenge.expires_at;
         const credentials = new CredentialRepository(transaction);
         const recent = await credentials.recentHashes(
           challenge.user_id,
@@ -331,7 +333,20 @@ export class OtpService {
         });
         return true;
       },
-    );
+    ).catch(async (error: unknown) => {
+      // A rejected passcode choice must not burn the still-valid OTP.
+      const ttl = challengeExpiresAt
+        ? Math.floor((challengeExpiresAt.getTime() - Date.now()) / 1000)
+        : 0;
+      if (
+        error instanceof ApiError &&
+        error.code === "PASSCODE_REUSE" &&
+        code &&
+        ttl > 0
+      )
+        await this.secrets.put(input.challengeId, code, ttl);
+      throw error;
+    });
     if (!changed)
       throw new ApiError(401, "AUTHENTICATION_FAILED", "Authentication failed");
     await this.secrets.delete(input.challengeId);

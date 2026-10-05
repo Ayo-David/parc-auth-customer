@@ -761,7 +761,7 @@ CREATE TABLE public.customer_onboarding_sessions (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT customer_onboarding_completion_check CHECK (((((status)::text = 'COMPLETED'::text) AND (completed_at IS NOT NULL)) OR (((status)::text <> 'COMPLETED'::text) AND (completed_at IS NULL)))),
     CONSTRAINT customer_onboarding_sessions_completed_steps_check CHECK ((jsonb_typeof(completed_steps) = 'array'::text)),
-    CONSTRAINT customer_onboarding_sessions_status_check CHECK (((status)::text = ANY ((ARRAY['IN_PROGRESS'::character varying, 'COMPLETED'::character varying, 'EXPIRED'::character varying])::text[])))
+    CONSTRAINT customer_onboarding_sessions_status_check CHECK (((status)::text = ANY (ARRAY[('IN_PROGRESS'::character varying)::text, ('COMPLETED'::character varying)::text, ('EXPIRED'::character varying)::text])))
 );
 
 ALTER TABLE ONLY public.customer_onboarding_sessions FORCE ROW LEVEL SECURITY;
@@ -1467,11 +1467,11 @@ CREATE TABLE public.transaction_authorizations (
     consumed_by_service character varying(100),
     consumption_idempotency_key character varying(255),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT transaction_authorizations_authorization_method_check CHECK (((authorization_method)::text = ANY ((ARRAY['transaction_pin'::character varying, 'biometric'::character varying])::text[]))),
+    CONSTRAINT transaction_authorizations_authorization_method_check CHECK (((authorization_method)::text = ANY (ARRAY[('transaction_pin'::character varying)::text, ('biometric'::character varying)::text]))),
     CONSTRAINT transaction_authorizations_check CHECK ((((status)::text = 'CONSUMED'::text) = (consumed_at IS NOT NULL))),
     CONSTRAINT transaction_authorizations_check1 CHECK ((expires_at > created_at)),
     CONSTRAINT transaction_authorizations_request_hash_check CHECK ((request_hash ~ '^[a-f0-9]{64}$'::text)),
-    CONSTRAINT transaction_authorizations_status_check CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'CONSUMED'::character varying, 'REVOKED'::character varying])::text[])))
+    CONSTRAINT transaction_authorizations_status_check CHECK (((status)::text = ANY (ARRAY[('ACTIVE'::character varying)::text, ('CONSUMED'::character varying)::text, ('REVOKED'::character varying)::text])))
 );
 
 ALTER TABLE ONLY public.transaction_authorizations FORCE ROW LEVEL SECURITY;
@@ -3973,7 +3973,7 @@ ALTER TABLE ONLY public.notification_delivery_attempts
 --
 
 ALTER TABLE ONLY public.transaction_authorizations
-    ADD CONSTRAINT transaction_authorizations_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.users(id);
+    ADD CONSTRAINT transaction_authorizations_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer_profiles(id);
 
 
 --
@@ -4618,3 +4618,4 @@ ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 --
 -- PostgreSQL database dump complete
 --
+

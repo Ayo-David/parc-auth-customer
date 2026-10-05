@@ -9,6 +9,16 @@ export function createCustomerExperienceRouter(
   authenticate: RequestHandler,
 ): Router {
   const router = Router();
+  const resolve = async (customer?: AuthenticatedCustomer) => {
+    const identity = required(customer);
+    return {
+      tenantId: identity.tenantId,
+      userId: await service.userIdForCustomer(
+        identity.tenantId,
+        identity.subject,
+      ),
+    };
+  };
   router.use("/v1/security", authenticate);
   router.use("/v1/notifications", authenticate);
   router.use("/v1/notification-preferences", authenticate);
@@ -16,17 +26,15 @@ export function createCustomerExperienceRouter(
   router.use("/v1/referrals/summary", authenticate);
   router.get("/v1/security", async (request, response, next) => {
     try {
-      const identity = required(request.authenticatedCustomer);
-      response.json(
-        await service.security(identity.tenantId, identity.subject),
-      );
+      const identity = await resolve(request.authenticatedCustomer);
+      response.json(await service.security(identity.tenantId, identity.userId));
     } catch (error) {
       next(error);
     }
   });
   router.get("/v1/notifications", async (request, response, next) => {
     try {
-      const identity = required(request.authenticatedCustomer);
+      const identity = await resolve(request.authenticatedCustomer);
       const pageSize = z.coerce
         .number()
         .int()
@@ -37,7 +45,7 @@ export function createCustomerExperienceRouter(
       response.json(
         await service.notifications(
           identity.tenantId,
-          identity.subject,
+          identity.userId,
           pageSize,
         ),
       );
@@ -49,11 +57,11 @@ export function createCustomerExperienceRouter(
     "/v1/notification-preferences",
     async (request, response, next) => {
       try {
-        const identity = required(request.authenticatedCustomer);
+        const identity = await resolve(request.authenticatedCustomer);
         response.json(
           await service.notificationPreferences(
             identity.tenantId,
-            identity.subject,
+            identity.userId,
           ),
         );
       } catch (error) {
@@ -66,7 +74,7 @@ export function createCustomerExperienceRouter(
     async (request, response, next) => {
       try {
         requiredHeader(request, "idempotency-key");
-        const identity = required(request.authenticatedCustomer);
+        const identity = await resolve(request.authenticatedCustomer);
         const category = z
           .string()
           .regex(/^[A-Z][A-Z0-9_]{1,99}$/)
@@ -83,7 +91,7 @@ export function createCustomerExperienceRouter(
         response.json(
           await service.updateNotificationPreference({
             tenantId: identity.tenantId,
-            userId: identity.subject,
+            userId: identity.userId,
             category,
             pushEnabled: body.push_enabled,
             smsEnabled: body.sms_enabled,
@@ -99,7 +107,7 @@ export function createCustomerExperienceRouter(
   router.put("/v1/devices/push-token", async (request, response, next) => {
     try {
       requiredHeader(request, "idempotency-key");
-      const identity = required(request.authenticatedCustomer);
+      const identity = await resolve(request.authenticatedCustomer);
       const body = z
         .object({
           device_identifier: z.string().min(1).max(255),
@@ -114,7 +122,7 @@ export function createCustomerExperienceRouter(
       response.json(
         await service.registerPushDevice({
           tenantId: identity.tenantId,
-          userId: identity.subject,
+          userId: identity.userId,
           deviceIdentifier: body.device_identifier,
           pushToken: body.push_token,
           platform: body.platform,
@@ -130,10 +138,10 @@ export function createCustomerExperienceRouter(
   router.delete("/v1/devices/:id", async (request, response, next) => {
     try {
       requiredHeader(request, "idempotency-key");
-      const identity = required(request.authenticatedCustomer);
+      const identity = await resolve(request.authenticatedCustomer);
       await service.revokeDevice(
         identity.tenantId,
-        identity.subject,
+        identity.userId,
         z.string().uuid().parse(request.params.id),
       );
       response.status(204).send();
@@ -146,10 +154,10 @@ export function createCustomerExperienceRouter(
     async (request, response, next) => {
       try {
         requiredHeader(request, "idempotency-key");
-        const identity = required(request.authenticatedCustomer);
+        const identity = await resolve(request.authenticatedCustomer);
         await service.revokeSession(
           identity.tenantId,
-          identity.subject,
+          identity.userId,
           z.string().uuid().parse(request.params.id),
         );
         response.status(204).send();
@@ -160,9 +168,9 @@ export function createCustomerExperienceRouter(
   );
   router.get("/v1/referrals/summary", async (request, response, next) => {
     try {
-      const identity = required(request.authenticatedCustomer);
+      const identity = await resolve(request.authenticatedCustomer);
       response.json(
-        await service.referralSummary(identity.tenantId, identity.subject),
+        await service.referralSummary(identity.tenantId, identity.userId),
       );
     } catch (error) {
       next(error);

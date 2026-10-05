@@ -92,36 +92,59 @@ export class OnboardingService {
         input.tenantId,
         phone,
       );
-      if (existing)
-        throw new ApiError(
-          409,
-          "CUSTOMER_ALREADY_EXISTS",
-          "A customer with these details already exists",
-        );
-      const user = await users.create({
-        tenantId: input.tenantId,
-        phone,
-        phoneNormalized: phone,
-      });
-      const profile = await new CustomerRepository(tx).create({
-        tenantId: input.tenantId,
-        userId: user.id,
-        customerNumber: `CUS-${randomUUID().replaceAll("-", "").toUpperCase()}`,
-      });
-      await new ConsentRepository(tx).grantAll({
-        tenantId: input.tenantId,
-        userId: user.id,
-        documents,
-        ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
-        ...(input.userAgent ? { userAgent: input.userAgent } : {}),
-      });
-      if (input.referralCode)
-        await this.attachReferral(
-          tx,
-          input.tenantId,
-          user.id,
-          input.referralCode,
-        );
+      let user: { id: string };
+      let profile: { id: string };
+      if (existing) {
+        // Only a customer whose unfinished onboarding lapsed may start again.
+        const lapsed = await tx<SessionRecord>("customer_onboarding_sessions")
+          .where({ user_id: existing.id, status: "IN_PROGRESS" })
+          .where("expires_at", "<=", tx.fn.now())
+          .orderBy("created_at", "desc")
+          .first();
+        if (!lapsed)
+          throw new ApiError(
+            409,
+            "CUSTOMER_ALREADY_EXISTS",
+            "A customer with these details already exists",
+          );
+        await tx("customer_onboarding_sessions")
+          .where({ id: lapsed.id })
+          .update({ status: "EXPIRED" });
+        user = existing;
+        profile = { id: lapsed.customer_id };
+        await new ConsentRepository(tx).grantAll({
+          tenantId: input.tenantId,
+          userId: user.id,
+          documents,
+          ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
+          ...(input.userAgent ? { userAgent: input.userAgent } : {}),
+        });
+      } else {
+        user = await users.create({
+          tenantId: input.tenantId,
+          phone,
+          phoneNormalized: phone,
+        });
+        profile = await new CustomerRepository(tx).create({
+          tenantId: input.tenantId,
+          userId: user.id,
+          customerNumber: `CUS-${randomUUID().replaceAll("-", "").toUpperCase()}`,
+        });
+        await new ConsentRepository(tx).grantAll({
+          tenantId: input.tenantId,
+          userId: user.id,
+          documents,
+          ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
+          ...(input.userAgent ? { userAgent: input.userAgent } : {}),
+        });
+        if (input.referralCode)
+          await this.attachReferral(
+            tx,
+            input.tenantId,
+            user.id,
+            input.referralCode,
+          );
+      }
       const [session] = (await tx("customer_onboarding_sessions")
         .insert({
           tenant_id: input.tenantId,
@@ -144,6 +167,19 @@ export class OnboardingService {
         responseBody: result,
       });
       return result;
+    });
+  }
+
+  /** Customer access tokens carry the profile ID; onboarding rows key on users.id. */
+  public userIdForCustomer(
+    tenantId: string,
+    customerId: string,
+  ): Promise<string> {
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const profile = await new CustomerRepository(tx).findById(customerId);
+      if (!profile)
+        throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
+      return profile.user_id;
     });
   }
 
@@ -308,9 +344,21 @@ export class OnboardingService {
   }
 
   public markEmailVerified(tenantId: string, userId: string): Promise<object> {
-    return withTenantTransaction(this.database, tenantId, async (tx) =>
-      this.advance(tx, await this.session(tx, userId), "EMAIL", "IDENTITY"),
-    );
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const session = await this.session(tx, userId);
+      this.requireStep(session, "EMAIL");
+      const user = await tx("users")
+        .where({ id: session.user_id, email_verified: true })
+        .whereNotNull("email")
+        .first("id");
+      if (!user)
+        throw new ApiError(
+          422,
+          "EMAIL_NOT_VERIFIED",
+          "Email verification has not completed",
+        );
+      return this.advance(tx, session, "EMAIL", "IDENTITY");
+    });
   }
 
   public markIdentity(

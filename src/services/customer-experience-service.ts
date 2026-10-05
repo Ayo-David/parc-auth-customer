@@ -1,8 +1,23 @@
 import type { Knex } from "knex";
 import { withTenantTransaction } from "../database/transaction.js";
+import { ApiError } from "../http/api-error.js";
+import { CustomerRepository } from "../repositories/customer-repository.js";
 
 export class CustomerExperienceService {
   public constructor(private readonly database: Knex) {}
+
+  /** Customer access tokens carry the profile ID; user-owned rows key on users.id. */
+  public userIdForCustomer(
+    tenantId: string,
+    customerId: string,
+  ): Promise<string> {
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const profile = await new CustomerRepository(tx).findById(customerId);
+      if (!profile)
+        throw new ApiError(401, "UNAUTHORIZED", "Authentication failed");
+      return profile.user_id;
+    });
+  }
 
   public security(
     tenantId: string,
@@ -235,7 +250,7 @@ export class CustomerExperienceService {
         const existing = await tx("user_devices")
           .where({ id: deviceId, tenant_id: tenantId, user_id: userId })
           .first("id");
-        if (!existing) throw new Error("Device not found");
+        if (!existing) throw new ApiError(404, "NOT_FOUND", "Device not found");
       }
       await tx("user_sessions")
         .where({ tenant_id: tenantId, subject_id: userId, device_id: deviceId })
@@ -258,7 +273,8 @@ export class CustomerExperienceService {
         const existing = await tx("user_sessions")
           .where({ id: sessionId, tenant_id: tenantId, subject_id: userId })
           .first("id");
-        if (!existing) throw new Error("Session not found");
+        if (!existing)
+          throw new ApiError(404, "NOT_FOUND", "Session not found");
       }
     });
   }

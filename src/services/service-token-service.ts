@@ -56,6 +56,8 @@ interface VerifiedSubject {
   tenantId: string | null;
   expiresAt: number;
   act?: unknown;
+  /** Set for delegated tokens: the tenant fixed by the original exchange. */
+  boundTenantId?: string | null;
 }
 
 export interface SubjectSessions {
@@ -260,7 +262,8 @@ export class ServiceTokenService implements ServiceAuthorization {
           (await this.dependencies.tenants.getTenantStatus(tenantId)) ===
           "ACTIVE";
       } catch {
-        active = false;
+        // Fail closed for this request only; a transient outage is not cached.
+        throw new OAuthError(400, "invalid_grant", "Tenant is not active");
       }
       if (this.tenantStatus.size >= 10_000) this.tenantStatus.clear();
       this.tenantStatus.set(tenantId, {
@@ -327,6 +330,7 @@ export class ServiceTokenService implements ServiceAuthorization {
         tenantId: sessionTenant,
         expiresAt: subject.exp,
         act: subject.act,
+        boundTenantId: subject.tenant_id,
       };
     }
     if (payload.token_use !== undefined)
@@ -367,6 +371,16 @@ export class ServiceTokenService implements ServiceAuthorization {
     subject: VerifiedSubject,
     tenantId: string | null,
   ): void {
+    // A delegated token keeps the tenant chosen when it was first exchanged.
+    if (
+      subject.boundTenantId !== undefined &&
+      subject.boundTenantId !== tenantId
+    )
+      throw new OAuthError(
+        400,
+        "invalid_grant",
+        "The user does not belong to the requested tenant",
+      );
     const permitted =
       subject.scope === "PLATFORM"
         ? subject.type === "ADMINISTRATOR"

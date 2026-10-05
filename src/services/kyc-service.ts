@@ -281,7 +281,48 @@ export class KycService {
             "KYC_CONSENT_REQUIRED",
             "Active KYC consent is required",
           );
-        await new KycRepository(transaction).create({
+        // The face check only counts for the identity this customer already verified.
+        const verifiedIdentity = await transaction("kyc_verifications as v")
+          .join(
+            "identity_verification_evidence as e",
+            "e.verification_id",
+            "v.id",
+          )
+          .where({
+            "v.customer_id": customer.id,
+            "v.verification_type": input.identityType,
+            "v.status": "VERIFIED",
+            "e.identifier_type": input.identityType,
+            "e.identifier_hash": identifierHash,
+          })
+          .first("v.id");
+        if (!verifiedIdentity)
+          throw new ApiError(
+            422,
+            "IDENTITY_NOT_VERIFIED",
+            "Identity verification has not completed",
+          );
+        await transaction.raw(
+          "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+          [`${input.tenantId}:liveness:${input.livenessReference}`],
+        );
+        const reused = await transaction("kyc_verifications")
+          .where({ verification_type: "BIOMETRIC" })
+          .andWhere((query) =>
+            query
+              .whereRaw("metadata->>'liveness_reference' = ?", [
+                input.livenessReference,
+              ])
+              .orWhere("provider_reference", input.livenessReference),
+          )
+          .first("id");
+        if (reused)
+          throw new ApiError(
+            409,
+            "LIVENESS_REFERENCE_REUSED",
+            "Liveness reference was already used",
+          );
+        const record = await new KycRepository(transaction).create({
           verificationId,
           tenantId: input.tenantId,
           customerId: customer.id,
@@ -289,6 +330,14 @@ export class KycService {
           identityType: "BIOMETRIC",
           providerName: provider.name,
         });
+        await transaction("kyc_verifications")
+          .where({ id: record.id })
+          .update({
+            metadata: {
+              masked_identity: maskedIdentity,
+              liveness_reference: input.livenessReference,
+            },
+          });
         return { customerId: customer.id };
       },
     );

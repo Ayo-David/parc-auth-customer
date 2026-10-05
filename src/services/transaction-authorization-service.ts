@@ -67,13 +67,12 @@ export class TransactionAuthorizationService {
       this.database,
       input.tenantId,
       async (transaction) => {
-        const existing = await transaction<AuthorizationRow>(
-          "transaction_authorizations",
-        )
-          .where("tenant_id", input.tenantId)
-          .andWhere("issue_idempotency_key", input.idempotencyKey)
-          .first();
-        if (existing) {
+        const findExisting = () =>
+          transaction<AuthorizationRow>("transaction_authorizations")
+            .where("tenant_id", input.tenantId)
+            .andWhere("issue_idempotency_key", input.idempotencyKey)
+            .first();
+        const replay = (existing: AuthorizationRow) => {
           if (
             existing.customer_id !== input.customerId ||
             existing.command_type !== input.commandType ||
@@ -90,18 +89,30 @@ export class TransactionAuthorizationService {
             authorization_token: token,
             expires_at: existing.expires_at.toISOString(),
           };
+        };
+        const existing = await findExisting();
+        if (existing) return replay(existing);
+        try {
+          // Savepoint, so a concurrent duplicate leaves the transaction usable.
+          await transaction.transaction((savepoint) =>
+            savepoint("transaction_authorizations").insert({
+              tenant_id: input.tenantId,
+              customer_id: input.customerId,
+              command_type: input.commandType,
+              resource_id: input.resourceId,
+              request_hash: input.requestHash,
+              authorization_method: input.method,
+              token_hash: this.hash(token),
+              issue_idempotency_key: input.idempotencyKey,
+              expires_at: expiresAt,
+            }),
+          );
+        } catch (error) {
+          if ((error as { code?: unknown }).code !== "23505") throw error;
+          const raced = await findExisting();
+          if (!raced) throw error;
+          return replay(raced);
         }
-        await transaction("transaction_authorizations").insert({
-          tenant_id: input.tenantId,
-          customer_id: input.customerId,
-          command_type: input.commandType,
-          resource_id: input.resourceId,
-          request_hash: input.requestHash,
-          authorization_method: input.method,
-          token_hash: this.hash(token),
-          issue_idempotency_key: input.idempotencyKey,
-          expires_at: expiresAt,
-        });
         return {
           authorization_token: token,
           expires_at: expiresAt.toISOString(),

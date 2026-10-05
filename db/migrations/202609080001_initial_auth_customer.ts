@@ -7,7 +7,7 @@ export const config = { transaction: false };
 const approvedExistingBaselineHash =
   "fc648c48a8f623db1c73fd424892f1deabf0e96581d5fdb548cdf2c7eaf75eec";
 const canonicalSnapshotHash =
-  "068660861d1735aa44095162a47909bf09455aad7abdec29ac067a11bb7dcbd0";
+  "31126a8bac52797c50d7f2f606ecadb888edc66376ef7f7fe2aea02f003bfa30";
 
 export async function up(knex: Knex): Promise<void> {
   if (await knex.schema.hasTable("users")) {
