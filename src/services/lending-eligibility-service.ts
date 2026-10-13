@@ -86,15 +86,22 @@ export class LendingEligibilityService {
               "source_reference",
               "updated_at",
             ),
+          // Clients may cite the granted consent or the consent document it
+          // accepted (mobile sends the document id from reference data).
           tx("user_consents")
             .where({
               tenant_id: input.tenantId,
               user_id: customer.user_id,
-              id: input.consentReference,
               granted: true,
             })
+            .andWhere((query) =>
+              query
+                .where("id", input.consentReference)
+                .orWhere("consent_document_id", input.consentReference),
+            )
             .whereNull("withdrawn_at")
             .whereNull("deleted_at")
+            .orderBy("granted_at", "desc")
             .first(
               "id",
               "consent_type",
