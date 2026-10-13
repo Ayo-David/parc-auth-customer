@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+/** Provider base URL without a trailing slash, so paths join cleanly. */
+const baseUrl = (fallback: string) =>
+  z
+    .string()
+    .url()
+    .default(fallback)
+    .transform((value) => value.replace(/\/+$/, ""));
+
 const environmentSchema = z
   .object({
     NODE_ENV: z
@@ -43,8 +51,29 @@ const environmentSchema = z
       .string()
       .min(32)
       .default("development-token-hash-secret-change-me"),
-    KYC_PROVIDER: z.enum(["VERIFYME"]).default("VERIFYME"),
-    VERIFYME_BASE_URL: z.string().url().default("https://vapi.verifyme.ng"),
+    /** Providers are chosen per capability so identity and face checks can differ. */
+    KYC_IDENTITY_PROVIDER: z.enum(["VERIFYME", "PREMBLY"]).default("PREMBLY"),
+    KYC_FACE_PROVIDER: z.enum(["VERIFYME", "PREMBLY"]).default("PREMBLY"),
+    PREMBLY_BASE_URL: baseUrl("https://api.prembly.com"),
+    PREMBLY_API_KEY: z
+      .string()
+      .min(1)
+      .default("development-prembly-key-change-me"),
+    PREMBLY_APP_ID: z.string().min(1).optional(),
+    PREMBLY_CONFIGURATION_VERSION: z.string().min(1).default("development-v1"),
+    PREMBLY_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+    PREMBLY_FACE_MATCH_THRESHOLD: z.coerce
+      .number()
+      .int()
+      .min(70)
+      .max(100)
+      .default(80),
+    PREMBLY_ALLOW_SANDBOX: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    PREMBLY_LIVENESS_MIN_PERCENT: z.coerce.number().min(0).max(100).default(90),
+    VERIFYME_BASE_URL: baseUrl("https://vapi.verifyme.ng"),
     VERIFYME_API_KEY: z
       .string()
       .min(1)
@@ -66,6 +95,22 @@ const environmentSchema = z
       .default("false")
       .transform((value) => value === "true"),
     RABBITMQ_URL: z.string().url().default("amqp://localhost:5672"),
+    /** Relays outbox events (OTP and other notifications) to RabbitMQ. */
+    OUTBOX_PUBLISHER_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    OUTBOX_TENANT_IDS: z
+      .string()
+      .default("")
+      .transform((value) =>
+        value
+          .split(",")
+          .map((tenantId) => tenantId.trim())
+          .filter(Boolean),
+      )
+      .pipe(z.array(z.string().uuid())),
+    OUTBOX_POLL_MS: z.coerce.number().int().min(100).default(1_000),
     NOTIFICATION_MAX_ATTEMPTS: z.coerce
       .number()
       .int()
@@ -90,12 +135,12 @@ const environmentSchema = z
       .int()
       .positive()
       .default(10_000),
-    BREVO_BASE_URL: z.string().url().default("https://api.brevo.com"),
+    BREVO_BASE_URL: baseUrl("https://api.brevo.com"),
     BREVO_API_KEY: z.string().min(1).default("development-brevo-key-change-me"),
     BREVO_SENDER_EMAIL: z.string().email().default("no-reply@parc.invalid"),
     BREVO_SENDER_NAME: z.string().min(1).default("Parc"),
     BREVO_CONFIGURATION_VERSION: z.string().min(1).default("development-v1"),
-    TERMII_BASE_URL: z.string().url().default("https://api.ng.termii.com"),
+    TERMII_BASE_URL: baseUrl("https://api.ng.termii.com"),
     TERMII_API_KEY: z
       .string()
       .min(1)
@@ -148,10 +193,40 @@ const environmentSchema = z
     { message: "Production requires TOKEN_HASH_SECRET" },
   )
   .refine(
-    ({ NODE_ENV, VERIFYME_API_KEY }) =>
+    ({
+      NODE_ENV,
+      KYC_IDENTITY_PROVIDER,
+      KYC_FACE_PROVIDER,
+      VERIFYME_API_KEY,
+    }) =>
       NODE_ENV !== "production" ||
+      (KYC_IDENTITY_PROVIDER !== "VERIFYME" &&
+        KYC_FACE_PROVIDER !== "VERIFYME") ||
       VERIFYME_API_KEY !== "development-verifyme-key-change-me",
     { message: "Production requires VERIFYME_API_KEY" },
+  )
+  .refine(
+    ({ NODE_ENV, KYC_IDENTITY_PROVIDER, KYC_FACE_PROVIDER, PREMBLY_API_KEY }) =>
+      NODE_ENV !== "production" ||
+      (KYC_IDENTITY_PROVIDER !== "PREMBLY" &&
+        KYC_FACE_PROVIDER !== "PREMBLY") ||
+      PREMBLY_API_KEY !== "development-prembly-key-change-me",
+    { message: "Production requires PREMBLY_API_KEY" },
+  )
+  .refine(
+    ({ NODE_ENV, PREMBLY_ALLOW_SANDBOX }) =>
+      NODE_ENV !== "production" || !PREMBLY_ALLOW_SANDBOX,
+    { message: "Production must not accept Prembly sandbox responses" },
+  )
+  .refine(
+    ({ OUTBOX_PUBLISHER_ENABLED, OUTBOX_TENANT_IDS }) =>
+      !OUTBOX_PUBLISHER_ENABLED || OUTBOX_TENANT_IDS.length > 0,
+    { message: "OUTBOX_PUBLISHER_ENABLED requires OUTBOX_TENANT_IDS" },
+  )
+  .refine(
+    ({ NODE_ENV, OUTBOX_PUBLISHER_ENABLED }) =>
+      NODE_ENV !== "production" || OUTBOX_PUBLISHER_ENABLED,
+    { message: "Production requires OUTBOX_PUBLISHER_ENABLED" },
   )
   .refine(
     ({ NODE_ENV, KYC_IDENTIFIER_HASH_SECRET }) =>

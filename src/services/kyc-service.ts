@@ -11,16 +11,19 @@ import {
 import { IdempotencyRepository } from "../repositories/idempotency-repository.js";
 import { EventRepository } from "../repositories/event-repository.js";
 import type {
+  FaceEvidence,
   KycIdentityType,
+  KycProviderName,
   KycProviderResolver,
   KycProviderResult,
+  VerifiedIdentityAttributes,
 } from "../providers/kyc-provider.js";
 
 export interface KycVerificationView {
   id: string;
   identity_type: KycIdentityType | "BIOMETRIC";
   masked_identity: string;
-  provider: "VERIFYME";
+  provider: KycProviderName;
   status: "PENDING" | "VERIFIED" | "FAILED" | "MANUAL_REVIEW";
   created_at: string;
 }
@@ -83,7 +86,7 @@ export class KycService {
   public async start(
     input: StartKycVerificationInput,
   ): Promise<KycVerificationView> {
-    const provider = await this.providers.resolve(input.tenantId);
+    const provider = await this.providers.identity(input.tenantId);
     const maskedIdentity = maskIdentity(input.identityValue);
     const identifierHash = createHmac(
       "sha256",
@@ -163,13 +166,14 @@ export class KycService {
     );
     if ("replay" in initial) return initial.replay;
 
-    const providerResult = await provider.verifyIdentity({
-      verificationId,
-      identityType: input.identityType,
-      identityValue: input.identityValue,
-      ...(initial.firstName ? { firstName: initial.firstName } : {}),
-      ...(initial.lastName ? { lastName: initial.lastName } : {}),
-    });
+    const { identityAttributes, ...providerResult } =
+      await provider.verifyIdentity({
+        verificationId,
+        identityType: input.identityType,
+        identityValue: input.identityValue,
+        ...(initial.firstName ? { firstName: initial.firstName } : {}),
+        ...(initial.lastName ? { lastName: initial.lastName } : {}),
+      });
     return withTenantTransaction(
       this.database,
       input.tenantId,
@@ -179,6 +183,12 @@ export class KycService {
           verificationId,
           ...providerResult,
         });
+        if (providerResult.outcome === "VERIFIED" && identityAttributes)
+          await this.applyRegisteredIdentity(
+            transaction,
+            initial.customerId,
+            identityAttributes,
+          );
         if (providerResult.outcome === "VERIFIED")
           await repository.recordEvidence({
             tenantId: input.tenantId,
@@ -219,9 +229,18 @@ export class KycService {
   }
 
   public async startBiometric(
-    input: StartKycVerificationInput & { livenessReference: string },
+    input: StartKycVerificationInput & { evidence: FaceEvidence },
   ): Promise<KycVerificationView> {
-    const provider = await this.providers.resolve(input.tenantId);
+    const provider = await this.providers.face(input.tenantId);
+    const livenessReference =
+      input.evidence.kind === "LIVENESS_REFERENCE"
+        ? input.evidence.reference
+        : undefined;
+    // Only a digest of the selfie feeds the idempotency fingerprint; the image is never stored.
+    const evidenceDigest =
+      input.evidence.kind === "SELFIE_IMAGE"
+        ? createHash("sha256").update(input.evidence.imageBase64).digest("hex")
+        : undefined;
     const verificationId = randomUUID();
     const maskedIdentity = maskIdentity(input.identityValue);
     const identifierHash = createHmac(
@@ -236,7 +255,8 @@ export class KycService {
           userId: input.userId,
           identityType: input.identityType,
           identifierHash,
-          livenessReference: input.livenessReference,
+          livenessReference: livenessReference ?? null,
+          evidenceDigest: evidenceDigest ?? null,
           consentId: input.consentId,
           provider: provider.name,
         }),
@@ -302,26 +322,28 @@ export class KycService {
             "IDENTITY_NOT_VERIFIED",
             "Identity verification has not completed",
           );
-        await transaction.raw(
-          "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
-          [`${input.tenantId}:liveness:${input.livenessReference}`],
-        );
-        const reused = await transaction("kyc_verifications")
-          .where({ verification_type: "BIOMETRIC" })
-          .andWhere((query) =>
-            query
-              .whereRaw("metadata->>'liveness_reference' = ?", [
-                input.livenessReference,
-              ])
-              .orWhere("provider_reference", input.livenessReference),
-          )
-          .first("id");
-        if (reused)
-          throw new ApiError(
-            409,
-            "LIVENESS_REFERENCE_REUSED",
-            "Liveness reference was already used",
+        if (livenessReference) {
+          await transaction.raw(
+            "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+            [`${input.tenantId}:liveness:${livenessReference}`],
           );
+          const reused = await transaction("kyc_verifications")
+            .where({ verification_type: "BIOMETRIC" })
+            .andWhere((query) =>
+              query
+                .whereRaw("metadata->>'liveness_reference' = ?", [
+                  livenessReference,
+                ])
+                .orWhere("provider_reference", livenessReference),
+            )
+            .first("id");
+          if (reused)
+            throw new ApiError(
+              409,
+              "LIVENESS_REFERENCE_REUSED",
+              "Liveness reference was already used",
+            );
+        }
         const record = await new KycRepository(transaction).create({
           verificationId,
           tenantId: input.tenantId,
@@ -335,18 +357,21 @@ export class KycService {
           .update({
             metadata: {
               masked_identity: maskedIdentity,
-              liveness_reference: input.livenessReference,
+              face_evidence: input.evidence.kind,
+              ...(livenessReference
+                ? { liveness_reference: livenessReference }
+                : {}),
             },
           });
         return { customerId: customer.id };
       },
     );
     if ("replay" in initial) return initial.replay;
-    const providerResult = await provider.verifyBiometric({
+    const providerResult = await provider.verifyFace({
       verificationId,
       identityType: input.identityType,
       identityValue: input.identityValue,
-      livenessReference: input.livenessReference,
+      evidence: input.evidence,
     });
     return withTenantTransaction(
       this.database,
@@ -408,6 +433,25 @@ export class KycService {
         return toView(record);
       },
     );
+  }
+
+  /** The NIN register is the source of truth for the customer's legal name. */
+  private async applyRegisteredIdentity(
+    transaction: Knex.Transaction,
+    customerId: string,
+    attributes: VerifiedIdentityAttributes,
+  ): Promise<void> {
+    await transaction("customer_profiles")
+      .where({ id: customerId })
+      .update({
+        ...(attributes.firstName ? { first_name: attributes.firstName } : {}),
+        middle_name: attributes.middleName ?? null,
+        ...(attributes.lastName ? { last_name: attributes.lastName } : {}),
+        ...(attributes.dateOfBirth
+          ? { date_of_birth: attributes.dateOfBirth }
+          : {}),
+        updated_at: transaction.fn.now(),
+      });
   }
 
   private signResult(result: KycProviderResult): {

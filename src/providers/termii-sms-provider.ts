@@ -41,7 +41,8 @@ export class TermiiSmsProvider implements NotificationProvider {
           },
           body: JSON.stringify({
             api_key: this.options.apiKey,
-            to: message.destination,
+            // Termii expects international format without the leading "+".
+            to: message.destination.replace(/^\+/, ""),
             from: this.options.senderId,
             sms: message.body,
             type: "plain",

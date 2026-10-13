@@ -114,6 +114,8 @@ export function createApp({
   const app = express();
   app.disable("x-powered-by");
   app.use(helmet());
+  // Selfies for face verification need more room than any other request body.
+  app.use("/v1/onboarding/face-verification", express.json({ limit: "2mb" }));
   app.use(express.json({ limit: "256kb" }));
   app.use(
     pinoHttp({
@@ -255,6 +257,22 @@ export function createApp({
         code: error.code,
         message: error.message,
         ...(error.details === undefined ? {} : { details: error.details }),
+      });
+      return;
+    }
+    const bodyError =
+      error instanceof Error && "type" in error ? error.type : undefined;
+    if (bodyError === "entity.too.large") {
+      response.status(413).json({
+        code: "PAYLOAD_TOO_LARGE",
+        message: "Request body is too large",
+      });
+      return;
+    }
+    if (bodyError === "entity.parse.failed") {
+      response.status(400).json({
+        code: "INVALID_REQUEST",
+        message: "Request body is not valid JSON",
       });
       return;
     }
