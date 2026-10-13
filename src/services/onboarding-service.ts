@@ -183,6 +183,35 @@ export class OnboardingService {
     });
   }
 
+  /** The legal name recorded from the customer's verified identity. */
+  public registeredName(
+    tenantId: string,
+    userId: string,
+  ): Promise<
+    | { first_name: string; middle_name: string | null; last_name: string }
+    | undefined
+  > {
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const profile = await tx("customer_profiles")
+        .where({ user_id: userId })
+        .whereNull("deleted_at")
+        .first<
+          | {
+              first_name: string | null;
+              middle_name: string | null;
+              last_name: string | null;
+            }
+          | undefined
+        >("first_name", "middle_name", "last_name");
+      if (!profile?.first_name || !profile.last_name) return undefined;
+      return {
+        first_name: profile.first_name,
+        middle_name: profile.middle_name,
+        last_name: profile.last_name,
+      };
+    });
+  }
+
   public status(tenantId: string, userId: string): Promise<object> {
     return withTenantTransaction(this.database, tenantId, async (tx) => {
       const session = await this.session(tx, userId);

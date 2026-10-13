@@ -8,6 +8,25 @@ import type { OtpService } from "../services/otp-service.js";
 import { ApiError } from "./api-error.js";
 
 const phone = z.string().regex(/^\+234[789][01][0-9]{8}$/);
+/** JPEG or PNG selfie, raw base64 or a data URI; about 1.1 MB decoded at most. */
+const selfieImage = z
+  .string()
+  .max(1_500_000)
+  .transform((value) =>
+    value.replace(/^data:image\/(?:jpeg|jpg|png);base64,/, ""),
+  )
+  .pipe(
+    z
+      .string()
+      .min(1_000)
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/)
+      .refine((value) => {
+        const header = Buffer.from(value.slice(0, 16), "base64");
+        const jpeg = header[0] === 0xff && header[1] === 0xd8;
+        const png = header.subarray(0, 4).toString("hex") === "89504e47";
+        return jpeg || png;
+      }, "selfie_image must be a JPEG or PNG image"),
+  );
 const idempotency = (request: { header(name: string): string | undefined }) =>
   required(request, "idempotency-key");
 const tenant = (request: { header(name: string): string | undefined }) =>
@@ -224,7 +243,15 @@ export function createOnboardingRouter(
                 true,
               )
             : await onboarding.status(subject.tenantId, subject.userId);
-        response.status(202).json({ verification: result, onboarding: state });
+        const registeredName =
+          result.status === "VERIFIED"
+            ? await onboarding.registeredName(subject.tenantId, subject.userId)
+            : undefined;
+        response.status(202).json({
+          verification: result,
+          onboarding: state,
+          ...(registeredName ? { identity: registeredName } : {}),
+        });
       } catch (error) {
         next(error);
       }
@@ -240,17 +267,27 @@ export function createOnboardingRouter(
           .object({
             identity_type: z.literal("NIN"),
             identity_value: z.string().regex(/^[0-9]{11}$/),
-            liveness_reference: z.string().min(1).max(255),
+            liveness_reference: z.string().min(1).max(255).optional(),
+            selfie_image: selfieImage.optional(),
             consent_id: z.string().uuid(),
           })
           .strict()
+          .refine(
+            (value) => !value.liveness_reference !== !value.selfie_image,
+            "Provide exactly one of liveness_reference or selfie_image",
+          )
           .parse(request.body);
         const result = await kyc.startBiometric({
           tenantId: subject.tenantId,
           userId: subject.userId,
           identityType: input.identity_type,
           identityValue: input.identity_value,
-          livenessReference: input.liveness_reference,
+          evidence: input.selfie_image
+            ? { kind: "SELFIE_IMAGE", imageBase64: input.selfie_image }
+            : {
+                kind: "LIVENESS_REFERENCE",
+                reference: input.liveness_reference ?? "",
+              },
           consentId: input.consent_id,
           idempotencyKey: idempotency(request),
           correlationId: z

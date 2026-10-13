@@ -26,6 +26,8 @@ import { AdministratorAuthenticationService } from "./services/administrator-aut
 import { CustomerMfaService } from "./services/customer-mfa-service.js";
 import { PasskeyService } from "./services/passkey-service.js";
 import { VerifyMeProvider } from "./providers/verifyme-provider.js";
+import { PremblyProvider } from "./providers/prembly-provider.js";
+import { OutboxPublisher } from "./messaging/outbox-publisher.js";
 import { StaticKycProviderResolver } from "./providers/kyc-provider.js";
 import { KycService } from "./services/kyc-service.js";
 import { applicationDefault, getApps, initializeApp } from "firebase-admin/app";
@@ -110,15 +112,30 @@ const passkeyService = new PasskeyService(
   sessionService,
   config.CHALLENGE_HASH_SECRET,
 );
-const kycProvider = new VerifyMeProvider({
-  baseUrl: config.VERIFYME_BASE_URL,
-  apiKey: config.VERIFYME_API_KEY,
-  configurationVersion: config.VERIFYME_CONFIGURATION_VERSION,
-  timeoutMs: config.VERIFYME_TIMEOUT_MS,
-});
+const kycProviders = {
+  VERIFYME: new VerifyMeProvider({
+    baseUrl: config.VERIFYME_BASE_URL,
+    apiKey: config.VERIFYME_API_KEY,
+    configurationVersion: config.VERIFYME_CONFIGURATION_VERSION,
+    timeoutMs: config.VERIFYME_TIMEOUT_MS,
+  }),
+  PREMBLY: new PremblyProvider({
+    baseUrl: config.PREMBLY_BASE_URL,
+    apiKey: config.PREMBLY_API_KEY,
+    ...(config.PREMBLY_APP_ID ? { appId: config.PREMBLY_APP_ID } : {}),
+    configurationVersion: config.PREMBLY_CONFIGURATION_VERSION,
+    timeoutMs: config.PREMBLY_TIMEOUT_MS,
+    faceMatchThreshold: config.PREMBLY_FACE_MATCH_THRESHOLD,
+    livenessMinimumPercent: config.PREMBLY_LIVENESS_MIN_PERCENT,
+    allowSandbox: config.PREMBLY_ALLOW_SANDBOX,
+  }),
+};
 const kycService = new KycService(
   database,
-  new StaticKycProviderResolver(kycProvider),
+  new StaticKycProviderResolver(
+    kycProviders[config.KYC_IDENTITY_PROVIDER],
+    kycProviders[config.KYC_FACE_PROVIDER],
+  ),
   config.IDEMPOTENCY_HASH_SECRET,
   {
     identifierHashSecret: config.KYC_IDENTIFIER_HASH_SECRET,
@@ -168,6 +185,17 @@ const notificationWorker = config.NOTIFICATION_WORKER_ENABLED
     )
   : undefined;
 await notificationWorker?.start();
+// Started after the worker so its queue is bound before the first OTP is relayed.
+const outboxPublisher = config.OUTBOX_PUBLISHER_ENABLED
+  ? new OutboxPublisher(
+      database,
+      config.RABBITMQ_URL,
+      config.OUTBOX_TENANT_IDS,
+      config.OUTBOX_POLL_MS,
+      logger,
+    )
+  : undefined;
+outboxPublisher?.start();
 const authenticationService = new AuthenticationService(
   database,
   rateLimiter,
@@ -311,6 +339,10 @@ function shutdown(signal: NodeJS.Signals): void {
         logger.error({ err: redisError }, "Redis close failed");
         process.exitCode = 1;
       });
+    void outboxPublisher?.close().catch((publisherError: unknown) => {
+      logger.error({ err: publisherError }, "Outbox publisher close failed");
+      process.exitCode = 1;
+    });
     void notificationWorker?.close().catch((workerError: unknown) => {
       logger.error({ err: workerError }, "Notification worker close failed");
       process.exitCode = 1;

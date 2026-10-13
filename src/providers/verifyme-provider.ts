@@ -1,8 +1,11 @@
 import { z } from "zod";
-import type {
-  KycIdentityType,
-  KycProvider,
-  KycProviderResult,
+import {
+  unsupportedFaceEvidence,
+  type FaceEvidence,
+  type FaceVerificationProvider,
+  type IdentityVerificationProvider,
+  type KycIdentityType,
+  type KycProviderResult,
 } from "./kyc-provider.js";
 
 const verifyMeResponseSchema = z
@@ -40,7 +43,9 @@ export interface VerifyMeProviderOptions {
   fetchImplementation?: typeof fetch;
 }
 
-export class VerifyMeProvider implements KycProvider {
+export class VerifyMeProvider
+  implements IdentityVerificationProvider, FaceVerificationProvider
+{
   public readonly name = "VERIFYME" as const;
   private readonly fetchImplementation: typeof fetch;
 
@@ -115,16 +120,23 @@ export class VerifyMeProvider implements KycProvider {
     }
   }
 
-  public async verifyBiometric(input: {
+  public async verifyFace(input: {
     verificationId: string;
     identityType: KycIdentityType;
     identityValue: string;
-    livenessReference: string;
+    evidence: FaceEvidence;
   }): Promise<KycProviderResult> {
     const fallbackReference = `verifyme-biometric:${input.verificationId}`;
+    // VerifyMe only scores its own SDK liveness sessions.
+    if (input.evidence.kind !== "LIVENESS_REFERENCE")
+      return unsupportedFaceEvidence(
+        fallbackReference,
+        this.options.configurationVersion,
+      );
+    const livenessReference = input.evidence.reference;
     try {
       const response = await this.fetchImplementation(
-        `${this.options.baseUrl}/v1/verifications/liveness/${encodeURIComponent(input.livenessReference)}`,
+        `${this.options.baseUrl}/v1/verifications/liveness/${encodeURIComponent(livenessReference)}`,
         {
           method: "GET",
           headers: {
@@ -139,7 +151,7 @@ export class VerifyMeProvider implements KycProvider {
       );
       const parsed: z.infer<typeof livenessResponseSchema> | undefined =
         payload.success ? payload.data : undefined;
-      const providerReference = input.livenessReference;
+      const providerReference = livenessReference;
       // The face must match the identity being verified, not whichever one the
       // client bound to the liveness session.
       const identityConfirmed =

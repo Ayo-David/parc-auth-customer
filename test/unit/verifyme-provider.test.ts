@@ -106,11 +106,11 @@ test("requires VerifyMe liveness and face-match evidence", async () => {
       { status: 200 },
     ),
   );
-  const result = await provider(fetchImplementation).verifyBiometric({
+  const result = await provider(fetchImplementation).verifyFace({
     verificationId: "verification-id",
     identityType: "NIN",
     identityValue: "10000000001",
-    livenessReference: "face-reference",
+    evidence: { kind: "LIVENESS_REFERENCE", reference: "face-reference" },
   });
   expect(result).toMatchObject({
     outcome: "VERIFIED",
@@ -124,4 +124,19 @@ test("requires VerifyMe liveness and face-match evidence", async () => {
   });
   expect(JSON.stringify(result)).not.toContain("10000000001");
   expect(JSON.stringify(result)).not.toContain("sensitive");
+});
+
+test("rejects selfie evidence without calling VerifyMe", async () => {
+  const fetchImplementation = jest.fn<typeof fetch>();
+  const result = await provider(fetchImplementation).verifyFace({
+    verificationId: "verification-id",
+    identityType: "NIN",
+    identityValue: "10000000001",
+    evidence: { kind: "SELFIE_IMAGE", imageBase64: "aGVsbG8=" },
+  });
+  expect(result).toMatchObject({
+    outcome: "FAILED",
+    resultCode: "FACE_EVIDENCE_UNSUPPORTED",
+  });
+  expect(fetchImplementation).not.toHaveBeenCalled();
 });

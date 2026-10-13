@@ -1,7 +1,9 @@
 import { createHmac, randomUUID } from "node:crypto";
 import knex, { type Knex } from "knex";
 import type {
-  KycProvider,
+  FaceEvidence,
+  FaceVerificationProvider,
+  IdentityVerificationProvider,
   KycProviderResult,
 } from "../../src/providers/kyc-provider.js";
 import { StaticKycProviderResolver } from "../../src/providers/kyc-provider.js";
@@ -21,7 +23,9 @@ const evidenceKeys = {
   resultSigningKeyId: "sign-v1",
 };
 
-class FakeKycProvider implements KycProvider {
+class FakeKycProvider
+  implements IdentityVerificationProvider, FaceVerificationProvider
+{
   public readonly name = "VERIFYME" as const;
   public calls = 0;
   public lastIdentityValue?: string;
@@ -40,11 +44,11 @@ class FakeKycProvider implements KycProvider {
     return Promise.resolve(this.result);
   }
 
-  public verifyBiometric(input: {
+  public verifyFace(input: {
     verificationId: string;
     identityType: "NIN" | "BVN";
     identityValue: string;
-    livenessReference: string;
+    evidence: FaceEvidence;
   }): Promise<KycProviderResult> {
     this.calls += 1;
     this.lastIdentityValue = input.identityValue;
@@ -136,7 +140,7 @@ integrationTest(
     });
     const service = new KycService(
       database,
-      new StaticKycProviderResolver(provider),
+      new StaticKycProviderResolver(provider, provider),
       "i".repeat(32),
       evidenceKeys,
     );
@@ -213,7 +217,7 @@ integrationTest(
     });
     const service = new KycService(
       database,
-      new StaticKycProviderResolver(provider),
+      new StaticKycProviderResolver(provider, provider),
       "i".repeat(32),
       evidenceKeys,
     );
@@ -249,7 +253,7 @@ integrationTest(
     });
     const service = new KycService(
       database,
-      new StaticKycProviderResolver(provider),
+      new StaticKycProviderResolver(provider, provider),
       "i".repeat(32),
       evidenceKeys,
     );
@@ -274,6 +278,100 @@ integrationTest(
       code: "KYC_VERIFICATION_NOT_FOUND",
       status: 404,
     });
+    await cleanTenant(tenantId);
+  },
+  15_000,
+);
+
+integrationTest(
+  "fills the profile from the NIN register and matches a selfie without storing it",
+  async () => {
+    const tenantId = randomUUID();
+    const customer = await createCustomerWithConsent(tenantId);
+    const identityProvider = new FakeKycProvider({
+      outcome: "VERIFIED",
+      providerReference: "prembly-identity",
+      providerConfigurationVersion: "prembly-v1",
+      resultCode: "SUCCESS",
+      safeResult: { status: "success" },
+      identityAttributes: {
+        firstName: "Ada",
+        middleName: "Chioma",
+        lastName: "Okafor",
+        dateOfBirth: "1990-05-15",
+      },
+    });
+    const faceProvider = new FakeKycProvider({
+      outcome: "VERIFIED",
+      providerReference: "prembly-face",
+      providerConfigurationVersion: "prembly-v1",
+      resultCode: "LIVENESS_AND_FACE_MATCHED",
+      safeResult: {
+        status: "success",
+        liveness_verified: true,
+        face_matched: true,
+      },
+    });
+    const service = new KycService(
+      database,
+      new StaticKycProviderResolver(identityProvider, faceProvider),
+      "i".repeat(32),
+      evidenceKeys,
+    );
+    const identityValue = "10000000001";
+    const base = {
+      tenantId,
+      userId: customer.userId,
+      identityType: "NIN" as const,
+      identityValue,
+      consentId: customer.consentId,
+      correlationId: randomUUID(),
+    };
+
+    const identity = await service.start({
+      ...base,
+      idempotencyKey: randomUUID(),
+    });
+    expect(identity.status).toBe("VERIFIED");
+    const profile = await database("customer_profiles")
+      .where({ id: customer.customerId })
+      .first();
+    expect(profile).toMatchObject({
+      first_name: "Ada",
+      middle_name: "Chioma",
+      last_name: "Okafor",
+    });
+    expect(profile.date_of_birth).not.toBeNull();
+
+    const selfie = "/9j/" + "A".repeat(2_000);
+    const face = await service.startBiometric({
+      ...base,
+      idempotencyKey: randomUUID(),
+      evidence: { kind: "SELFIE_IMAGE", imageBase64: selfie },
+    });
+    expect(face).toMatchObject({
+      identity_type: "BIOMETRIC",
+      status: "VERIFIED",
+    });
+    expect(faceProvider.calls).toBe(1);
+    const stored = JSON.stringify([
+      await database("kyc_verifications")
+        .where({ tenant_id: tenantId })
+        .select("*"),
+      await database("kyc_verification_results")
+        .where({ tenant_id: tenantId })
+        .select("*"),
+      await database("identity_verification_evidence")
+        .where({ tenant_id: tenantId })
+        .select("*"),
+      await database("idempotency_keys")
+        .where({ tenant_id: tenantId })
+        .select("*"),
+    ]);
+    expect(stored).not.toContain(selfie.slice(0, 200));
+    expect(stored).not.toContain(identityValue);
+    expect(stored).not.toMatch(/Ada|Chioma|Okafor/);
+
     await cleanTenant(tenantId);
   },
   15_000,
