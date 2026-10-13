@@ -92,7 +92,7 @@ export class OutboxPublisher {
         await this.finish(row, undefined);
         published += 1;
       } catch (error) {
-        this.channel = undefined;
+        await this.discardConnection();
         await this.finish(row, error);
         throw error;
       }
@@ -172,6 +172,15 @@ export class OutboxPublisher {
               },
         ),
     );
+  }
+
+  /** Drops a failed channel so the next tick reconnects instead of leaking it. */
+  private async discardConnection(): Promise<void> {
+    const { channel, connection } = this;
+    this.channel = undefined;
+    this.connection = undefined;
+    await channel?.close().catch(() => undefined);
+    await connection?.close().catch(() => undefined);
   }
 
   private async connect(): Promise<ConfirmChannel> {

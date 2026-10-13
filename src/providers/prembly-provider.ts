@@ -243,9 +243,7 @@ export class PremblyProvider
     if (matchRejected?.outcome === "PENDING") return matchRejected;
     const record = ninRecord(match.body);
     const matchedRecord =
-      match.body.is_sandbox === true ||
-      !record?.nin ||
-      record.nin === input.identityValue;
+      match.body.is_sandbox === true || record?.nin === input.identityValue;
     const faceMatched =
       !matchRejected && faceData(match.body)?.status === true && matchedRecord;
     return this.result(

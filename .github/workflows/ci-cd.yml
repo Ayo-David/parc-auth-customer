@@ -118,7 +118,7 @@ jobs:
             set -euo pipefail
 
             # Non-secret service identity; these override the same keys if they also appear in the env file.
-            export NODE_ENV=production HOST=0.0.0.0 SERVICE_NAME=parc-auth-customer PORT=3001 RATE_LIMIT_STORE=redis NOTIFICATION_WORKER_ENABLED=true
+            export NODE_ENV=production HOST=0.0.0.0 SERVICE_NAME=parc-auth-customer PORT=3001 RATE_LIMIT_STORE=redis NOTIFICATION_WORKER_ENABLED=true OUTBOX_PUBLISHER_ENABLED=true
             # Image references must be lowercase; metadata-action lowercased the pushed name.
             IMAGE_NAME=$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
             # Per-service server state: .env plus current/previous image tags for rollback.
@@ -146,7 +146,7 @@ jobs:
             # Last assignment wins, matching docker --env-file.
             env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
 
-            for key in DATABASE_URL TENANT_ADMIN_INTERNAL_URL SERVICE_CLIENT_KEYS_JSON IDEMPOTENCY_HASH_SECRET CHALLENGE_HASH_SECRET REDIS_URL JWT_ISSUER JWT_ACTIVE_KID JWT_PRIVATE_KEY_BASE64 JWT_PUBLIC_KEYS_JSON TOKEN_HASH_SECRET VERIFYME_API_KEY KYC_IDENTIFIER_HASH_SECRET KYC_RESULT_SIGNING_SECRET RABBITMQ_URL NOTIFICATION_TARGET_HASH_SECRET BREVO_API_KEY TERMII_API_KEY; do
+            for key in DATABASE_URL TENANT_ADMIN_INTERNAL_URL SERVICE_CLIENT_KEYS_JSON IDEMPOTENCY_HASH_SECRET CHALLENGE_HASH_SECRET REDIS_URL JWT_ISSUER JWT_ACTIVE_KID JWT_PRIVATE_KEY_BASE64 JWT_PUBLIC_KEYS_JSON TOKEN_HASH_SECRET VERIFYME_API_KEY KYC_IDENTIFIER_HASH_SECRET KYC_RESULT_SIGNING_SECRET RABBITMQ_URL OUTBOX_TENANT_IDS NOTIFICATION_TARGET_HASH_SECRET BREVO_API_KEY TERMII_API_KEY; do
               if [ -z "$(env_value "$key")" ]; then
                 echo "$ENV_FILE must set $key." >&2
                 exit 1
@@ -175,7 +175,7 @@ jobs:
                 --restart always \
                 --network host \
                 --env-file "$ENV_FILE" \
-                -e NODE_ENV -e HOST -e PORT -e SERVICE_NAME -e SERVICE_VERSION -e RATE_LIMIT_STORE -e NOTIFICATION_WORKER_ENABLED ${FIREBASE_ARGS[@]+"${FIREBASE_ARGS[@]}"} \
+                -e NODE_ENV -e HOST -e PORT -e SERVICE_NAME -e SERVICE_VERSION -e RATE_LIMIT_STORE -e NOTIFICATION_WORKER_ENABLED -e OUTBOX_PUBLISHER_ENABLED ${FIREBASE_ARGS[@]+"${FIREBASE_ARGS[@]}"} \
                 "$1"
             }
 

@@ -250,6 +250,32 @@ test("fails a live selfie that does not match the NIN photo", async () => {
   });
 });
 
+test("fails a face match whose live record carries no NIN", async () => {
+  const fetchImplementation = jest
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(
+      json({ status: true, response_code: "00", data: { confidence: 0.98 } }),
+    )
+    .mockResolvedValueOnce(
+      json({
+        status: true,
+        response_code: "00",
+        face_data: { status: true, confidence: 96 },
+        nin_data: { firstname: "Ada", surname: "Okafor" },
+      }),
+    );
+  const result = await provider(fetchImplementation).verifyFace({
+    verificationId: "verification-id",
+    identityType: "NIN",
+    identityValue: nin,
+    evidence: { kind: "SELFIE_IMAGE", imageBase64: selfie },
+  });
+  expect(result).toMatchObject({
+    outcome: "FAILED",
+    resultCode: "FACE_NOT_MATCHED",
+  });
+});
+
 test("keeps the face check pending when Prembly is unavailable", async () => {
   const fetchImplementation = jest
     .fn<typeof fetch>()
