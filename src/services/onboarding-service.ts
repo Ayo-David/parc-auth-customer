@@ -95,30 +95,50 @@ export class OnboardingService {
       let user: { id: string };
       let profile: { id: string };
       if (existing) {
-        // Only a customer whose unfinished onboarding lapsed may start again.
-        const lapsed = await tx<SessionRecord>("customer_onboarding_sessions")
-          .where({ user_id: existing.id, status: "IN_PROGRESS" })
-          .where("expires_at", "<=", tx.fn.now())
+        // Only a phone that has finished onboarding is an existing customer;
+        // an unfinished one resumes, or restarts once its session lapsed.
+        // Ownership is still proven by the phone OTP issued after start.
+        const latest = await tx<SessionRecord>("customer_onboarding_sessions")
+          .where({ user_id: existing.id })
           .orderBy("created_at", "desc")
           .first();
-        if (!lapsed)
+        if (!latest || latest.status === "COMPLETED")
           throw new ApiError(
             409,
             "CUSTOMER_ALREADY_EXISTS",
             "A customer with these details already exists",
           );
-        await tx("customer_onboarding_sessions")
-          .where({ id: lapsed.id })
-          .update({ status: "EXPIRED" });
-        user = existing;
-        profile = { id: lapsed.customer_id };
         await new ConsentRepository(tx).grantAll({
           tenantId: input.tenantId,
-          userId: user.id,
+          userId: existing.id,
           documents,
           ...(input.ipAddress ? { ipAddress: input.ipAddress } : {}),
           ...(input.userAgent ? { userAgent: input.userAgent } : {}),
         });
+        if (
+          latest.status === "IN_PROGRESS" &&
+          latest.expires_at.getTime() > Date.now()
+        ) {
+          const resumed = {
+            onboarding_id: latest.id,
+            customer_id: latest.customer_id,
+            current_step: latest.current_step,
+          };
+          await idempotency.complete({
+            tenantId: input.tenantId,
+            key: input.idempotencyKey,
+            operation: "mobile-onboarding.start",
+            responseCode: 201,
+            responseBody: resumed,
+          });
+          return resumed;
+        }
+        if (latest.status === "IN_PROGRESS")
+          await tx("customer_onboarding_sessions")
+            .where({ id: latest.id })
+            .update({ status: "EXPIRED" });
+        user = existing;
+        profile = { id: latest.customer_id };
       } else {
         user = await users.create({
           tenantId: input.tenantId,
@@ -358,7 +378,8 @@ export class OnboardingService {
           "ONBOARDING_NOT_FOUND",
           "Onboarding session not found",
         );
-      this.requireStep(session, "PHONE_VERIFICATION");
+      // A resumed onboarding re-verifies the phone; advance() then returns the
+      // step the customer stopped at instead of rejecting it as out of order.
       const user = await tx("users")
         .where({ id: session.user_id, phone_verified: true })
         .first("id");
