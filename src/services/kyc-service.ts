@@ -135,12 +135,13 @@ export class KycService {
         );
         if (!customer)
           throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
-        if (
-          !(await new ConsentRepository(transaction).hasActiveKycConsent({
-            consentId: input.consentId,
-            userId: input.userId,
-          }))
-        )
+        const consentId = await new ConsentRepository(
+          transaction,
+        ).findActiveKycConsentId({
+          consentId: input.consentId,
+          userId: input.userId,
+        });
+        if (!consentId)
           throw new ApiError(
             422,
             "KYC_CONSENT_REQUIRED",
@@ -150,7 +151,7 @@ export class KycService {
           verificationId,
           tenantId: input.tenantId,
           customerId: customer.id,
-          consentId: input.consentId,
+          consentId,
           identityType: input.identityType,
           providerName: provider.name,
         });
@@ -159,6 +160,7 @@ export class KycService {
           .update({ metadata: { masked_identity: maskedIdentity } });
         return {
           customerId: customer.id,
+          consentId,
           ...(customer.first_name ? { firstName: customer.first_name } : {}),
           ...(customer.last_name ? { lastName: customer.last_name } : {}),
         };
@@ -193,7 +195,7 @@ export class KycService {
           await repository.recordEvidence({
             tenantId: input.tenantId,
             verificationId,
-            consentId: input.consentId,
+            consentId: initial.consentId,
             identityType: input.identityType,
             identifierMasked: maskedIdentity,
             identifierHash,
@@ -290,12 +292,13 @@ export class KycService {
         );
         if (!customer)
           throw new ApiError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
-        if (
-          !(await new ConsentRepository(transaction).hasActiveKycConsent({
-            consentId: input.consentId,
-            userId: input.userId,
-          }))
-        )
+        const consentId = await new ConsentRepository(
+          transaction,
+        ).findActiveKycConsentId({
+          consentId: input.consentId,
+          userId: input.userId,
+        });
+        if (!consentId)
           throw new ApiError(
             422,
             "KYC_CONSENT_REQUIRED",
@@ -348,7 +351,7 @@ export class KycService {
           verificationId,
           tenantId: input.tenantId,
           customerId: customer.id,
-          consentId: input.consentId,
+          consentId,
           identityType: "BIOMETRIC",
           providerName: provider.name,
         });
@@ -363,7 +366,7 @@ export class KycService {
                 : {}),
             },
           });
-        return { customerId: customer.id };
+        return { customerId: customer.id, consentId };
       },
     );
     if ("replay" in initial) return initial.replay;
@@ -386,7 +389,7 @@ export class KycService {
           await repository.recordEvidence({
             tenantId: input.tenantId,
             verificationId,
-            consentId: input.consentId,
+            consentId: initial.consentId,
             identityType: input.identityType,
             identifierMasked: maskedIdentity,
             identifierHash,
