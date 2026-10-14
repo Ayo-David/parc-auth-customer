@@ -91,3 +91,65 @@ integrationTest(
   },
   15_000,
 );
+
+integrationTest(
+  "resumes unfinished onboarding and rejects only completed customers",
+  async () => {
+    const tenantId = randomUUID();
+    const consentId = randomUUID();
+    const tenantAdmin: TenantAdminClient = {
+      validateRegistration: async () => [
+        {
+          id: consentId,
+          tenant_id: tenantId,
+          consent_type: "TERMS_AND_CONDITIONS",
+          document_version: "2026-09-14",
+        },
+      ],
+    };
+    const service = new OnboardingService(
+      database,
+      tenantAdmin,
+      "o".repeat(32),
+    );
+    const start = () =>
+      service.start({
+        tenantId,
+        idempotencyKey: randomUUID(),
+        phoneNumber: "+2348034567890",
+        consentIds: [consentId],
+      });
+    const first = await start();
+    const retried = await start();
+    expect(retried).toEqual(first);
+
+    const session = await database("customer_onboarding_sessions")
+      .where({ id: first.onboarding_id })
+      .first();
+    await database("users")
+      .where({ id: session.user_id })
+      .update({ phone_verified: true });
+    await service.markPhoneVerifiedBySession(tenantId, first.onboarding_id);
+    const resumed = await start();
+    expect(resumed).toEqual({ ...first, current_step: "EMAIL" });
+    const reverified = (await service.markPhoneVerifiedBySession(
+      tenantId,
+      resumed.onboarding_id,
+    )) as { current_step: string };
+    expect(reverified.current_step).toBe("EMAIL");
+
+    await database("customer_onboarding_sessions")
+      .where({ id: first.onboarding_id })
+      .update({
+        status: "COMPLETED",
+        current_step: "COMPLETED",
+        completed_at: database.fn.now(),
+      });
+    await expect(start()).rejects.toMatchObject({
+      code: "CUSTOMER_ALREADY_EXISTS",
+    });
+    await database("users").where({ id: session.user_id }).delete();
+    await database("idempotency_keys").where({ tenant_id: tenantId }).delete();
+  },
+  15_000,
+);
