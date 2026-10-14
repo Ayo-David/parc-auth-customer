@@ -71,7 +71,9 @@ async function createCustomerWithConsent(tenantId: string): Promise<{
   userId: string;
   customerId: string;
   consentId: string;
+  consentDocumentId: string;
 }> {
+  const consentDocumentId = randomUUID();
   return withTenantTransaction(database, tenantId, async (transaction) => {
     const [user] = await transaction("users")
       .insert({
@@ -94,7 +96,7 @@ async function createCustomerWithConsent(tenantId: string): Promise<{
       .insert({
         tenant_id: tenantId,
         user_id: user.id,
-        consent_document_id: randomUUID(),
+        consent_document_id: consentDocumentId,
         consent_type: "KYC",
         document_version: "2026-09-10",
         granted: true,
@@ -106,6 +108,7 @@ async function createCustomerWithConsent(tenantId: string): Promise<{
       userId: user.id,
       customerId: customer.id,
       consentId: consent.id,
+      consentDocumentId,
     };
   });
 }
@@ -125,6 +128,48 @@ async function cleanTenant(tenantId: string): Promise<void> {
   await database("idempotency_keys").where({ tenant_id: tenantId }).delete();
   await database("users").where({ tenant_id: tenantId }).delete();
 }
+
+integrationTest(
+  "accepts a consent document id and records the granted consent",
+  async () => {
+    const tenantId = randomUUID();
+    const customer = await createCustomerWithConsent(tenantId);
+    const provider = new FakeKycProvider({
+      outcome: "VERIFIED",
+      providerReference: "vm-document-consent",
+      providerConfigurationVersion: "verifyme-v1",
+      resultCode: "SUCCESS",
+      safeResult: { status: "success" },
+    });
+    const service = new KycService(
+      database,
+      new StaticKycProviderResolver(provider, provider),
+      "i".repeat(32),
+      evidenceKeys,
+    );
+
+    const result = await service.start({
+      tenantId,
+      userId: customer.userId,
+      identityType: "NIN",
+      identityValue: "10000000002",
+      consentId: customer.consentDocumentId,
+      idempotencyKey: randomUUID(),
+      correlationId: randomUUID(),
+    });
+
+    expect(result.status).toBe("VERIFIED");
+    const verification = await database("kyc_verifications")
+      .where({ tenant_id: tenantId })
+      .first("consent_id");
+    expect(verification.consent_id).toBe(customer.consentId);
+    const evidence = await database("identity_verification_evidence")
+      .where({ tenant_id: tenantId })
+      .first("consent_id");
+    expect(evidence.consent_id).toBe(customer.consentId);
+    await cleanTenant(tenantId);
+  },
+);
 
 integrationTest(
   "verifies identity without retaining plaintext BVN and replays idempotently",

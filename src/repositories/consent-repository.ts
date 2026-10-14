@@ -31,11 +31,15 @@ export class ConsentRepository {
     );
   }
 
-  public async hasActiveKycConsent(input: {
+  // Accepts a user_consents id or a consent document id and returns the
+  // user_consents id, which is what consent_id foreign keys reference.
+  public async findActiveKycConsentId(input: {
     consentId: string;
     userId: string;
-  }): Promise<boolean> {
-    const record = await this.transaction("user_consents")
+  }): Promise<string | undefined> {
+    const record: { id: string } | undefined = await this.transaction(
+      "user_consents",
+    )
       .where({
         user_id: input.userId,
         consent_type: "KYC",
@@ -48,7 +52,8 @@ export class ConsentRepository {
       )
       .whereNull("withdrawn_at")
       .whereNull("deleted_at")
+      .orderBy("granted_at", "desc")
       .first("id");
-    return Boolean(record);
+    return record?.id;
   }
 }
