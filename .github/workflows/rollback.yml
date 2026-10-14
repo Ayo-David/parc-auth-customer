@@ -98,6 +98,20 @@ jobs:
                 "$1"
             }
 
+            check_config() {
+              # Validates the env file against the image's config schema without touching the running container.
+              SERVICE_VERSION="${1##*:}" docker run --rm \
+                --env-file "$ENV_FILE" \
+                -e NODE_ENV -e HOST -e PORT -e SERVICE_NAME -e SERVICE_VERSION -e RATE_LIMIT_STORE -e NOTIFICATION_WORKER_ENABLED -e OUTBOX_PUBLISHER_ENABLED \
+                "$1" \
+                node --input-type=module -e '
+                  const { loadConfig } = await import("/app/dist/src/config/env.js");
+                  try { loadConfig(); } catch (error) {
+                    for (const issue of error.issues ?? [error]) console.error(`Invalid config: ${issue.message}`);
+                    process.exit(1);
+                  }'
+            }
+
             service_ready() {
               curl --fail --silent --max-time 2 "http://127.0.0.1:${PORT}/ready" >/dev/null
             }
@@ -127,6 +141,9 @@ jobs:
 
             echo "Rolling back to: $IMAGE_URI"
             docker pull "$IMAGE_URI"
+
+            echo "Checking $ENV_FILE against the rollback image's config..."
+            check_config "$IMAGE_URI"
 
             # Deliberately no migration step here: migrations are forward-only, so an
             # application rollback never reverts schema. If the failing deploy shipped a
