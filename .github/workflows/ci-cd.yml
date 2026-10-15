@@ -97,7 +97,7 @@ jobs:
     needs: build-and-push
     if: always() && needs.build-and-push.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: production # requires manual approval if the "production" environment has protection rules configured
+    environment: development # requires manual approval if the "production" environment has protection rules configured
     concurrency:
       group: deploy-parc-auth-customer
       cancel-in-progress: false
@@ -118,7 +118,7 @@ jobs:
             set -euo pipefail
 
             # Non-secret service identity; these override the same keys if they also appear in the env file.
-            export NODE_ENV=production HOST=0.0.0.0 SERVICE_NAME=parc-auth-customer PORT=3001 RATE_LIMIT_STORE=redis NOTIFICATION_WORKER_ENABLED=true OUTBOX_PUBLISHER_ENABLED=true
+            export NODE_ENV=development HOST=0.0.0.0 SERVICE_NAME=parc-auth-customer PORT=3001 RATE_LIMIT_STORE=redis NOTIFICATION_WORKER_ENABLED=true OUTBOX_PUBLISHER_ENABLED=true
             # Image references must be lowercase; metadata-action lowercased the pushed name.
             IMAGE_NAME=$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
             # Per-service server state: .env plus current/previous image tags for rollback.
