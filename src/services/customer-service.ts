@@ -14,6 +14,7 @@ import { IdempotencyRepository } from "../repositories/idempotency-repository.js
 import type { UserRecord } from "../repositories/types.js";
 import { UserRepository } from "../repositories/user-repository.js";
 import type { TenantAdminClient } from "./tenant-admin-client.js";
+import type { IdentityNumberCipher } from "../security/identity-number-cipher.js";
 
 export interface CustomerView {
   id: string;
@@ -70,11 +71,24 @@ function toView(
   };
 }
 
+/** What a payment provider needs to open an account in the customer's name. */
+export interface CustomerProviderProfile {
+  customer_id: string;
+  first_name: string;
+  middle_name: string | null;
+  last_name: string;
+  email: string;
+  phone_number: string;
+  /** The BVN verified at onboarding, or null if none is on file. */
+  bvn: string | null;
+}
+
 export class CustomerService {
   public constructor(
     private readonly database: Knex,
     private readonly tenantAdmin: TenantAdminClient,
     private readonly idempotencySecret: string,
+    private readonly identityNumbers?: IdentityNumberCipher,
   ) {}
 
   public async register(input: RegisterCustomerInput): Promise<CustomerView> {
@@ -307,6 +321,84 @@ export class CustomerService {
           "Idempotency key was used with a different request",
         );
       throw error;
+    });
+  }
+
+  /**
+   * Unmasked contact details for an identity-verified customer, read only by
+   * Payment (service scope auth.customer-provider-profile.read) to open the
+   * customer's provider account. Never exposed on a customer-facing route.
+   */
+  public providerProfile(
+    tenantId: string,
+    customerId: string,
+  ): Promise<CustomerProviderProfile> {
+    return withTenantTransaction(this.database, tenantId, async (tx) => {
+      const row = await tx("customer_profiles as c")
+        .join("users as u", "u.id", "c.user_id")
+        .where({ "c.id": customerId })
+        .whereNull("c.deleted_at")
+        .whereExists(
+          tx("kyc_profiles as k")
+            .whereRaw("k.customer_id = c.id")
+            .where({ "k.status": "VERIFIED" })
+            .whereNull("k.deleted_at"),
+        )
+        .first<
+          | {
+              first_name: string | null;
+              middle_name: string | null;
+              last_name: string | null;
+              email: string | null;
+              phone: string | null;
+            }
+          | undefined
+        >("c.first_name", "c.middle_name", "c.last_name", "u.email", "u.phone");
+      if (!row)
+        throw new ApiError(
+          404,
+          "VERIFIED_CUSTOMER_NOT_FOUND",
+          "No identity-verified customer was found",
+        );
+      if (!row.first_name || !row.last_name || !row.email || !row.phone)
+        throw new ApiError(
+          409,
+          "PROVIDER_PROFILE_INCOMPLETE",
+          "The customer's name, email or phone is missing",
+        );
+      const stored = this.identityNumbers
+        ? await tx("customer_identity_numbers")
+            .where({ customer_id: customerId, identity_type: "BVN" })
+            .first<
+              | {
+                  ciphertext: string;
+                  iv: string;
+                  auth_tag: string;
+                  key_id: string;
+                }
+              | undefined
+            >("ciphertext", "iv", "auth_tag", "key_id")
+        : undefined;
+      return {
+        customer_id: customerId,
+        first_name: row.first_name,
+        middle_name: row.middle_name,
+        last_name: row.last_name,
+        email: row.email,
+        phone_number: row.phone,
+        bvn:
+          stored && this.identityNumbers
+            ? this.identityNumbers.decrypt(
+                {
+                  ciphertext: stored.ciphertext,
+                  iv: stored.iv,
+                  authTag: stored.auth_tag,
+                  keyId: stored.key_id,
+                },
+                { tenantId, customerId, identityType: "BVN" },
+              )
+            : null,
+      };
     });
   }
 }

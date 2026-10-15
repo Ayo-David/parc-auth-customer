@@ -11,14 +11,18 @@ import {
 
 const paths = {
   ninBasic: "/verification/vnin-basic",
+  bvnBasic: "/verification/bvn_validation",
   liveness: "/verification/biometrics/face/liveliness_check",
   ninWithFace: "/verification/nin_w_face",
+  bvnWithFace: "/verification/bvn_w_face",
 } as const;
 
 const callLabels: Record<string, string> = {
   [paths.ninBasic]: "NIN lookup",
+  [paths.bvnBasic]: "BVN lookup",
   [paths.liveness]: "Liveness check",
   [paths.ninWithFace]: "NIN face match",
+  [paths.bvnWithFace]: "BVN face match",
 };
 
 const ninDataSchema = z
@@ -29,6 +33,18 @@ const ninDataSchema = z
     surname: z.string().optional(),
     birthdate: z.string().optional(),
     nin_suspension_status: z.boolean().optional(),
+  })
+  .passthrough();
+
+// BVN records come back camelCase (firstName, dateOfBirth "01-Jan-2000").
+const bvnDataSchema = z
+  .object({
+    bvn: z.string().optional(),
+    number: z.string().optional(),
+    firstName: z.string().optional(),
+    middleName: z.string().optional(),
+    lastName: z.string().optional(),
+    dateOfBirth: z.string().optional(),
   })
   .passthrough();
 
@@ -54,6 +70,7 @@ const responseSchema = z
     nin_data: ninDataSchema.optional(),
     face_data: faceDataSchema.optional(),
     data: ninDataSchema
+      .merge(bvnDataSchema)
       .extend({
         confidence: z.number().optional(),
         confidence_in_percentage: z.number().optional(),
@@ -106,17 +123,41 @@ function displayName(value?: string): string | undefined {
     );
 }
 
-/** Accepts YYYY-MM-DD, DD-MM-YYYY and DD/MM/YYYY; anything else is dropped. */
+const monthNumbers: Record<string, string> = {
+  jan: "01",
+  feb: "02",
+  mar: "03",
+  apr: "04",
+  may: "05",
+  jun: "06",
+  jul: "07",
+  aug: "08",
+  sep: "09",
+  oct: "10",
+  nov: "11",
+  dec: "12",
+};
+
+/**
+ * Accepts YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY and the BVN register's
+ * DD-Mon-YYYY ("01-Jan-2000"); anything else is dropped.
+ */
 function isoDate(value?: string): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
   const dayFirst = /^(\d{2})[-/](\d{2})[-/](\d{4})$/.exec(trimmed);
+  const monthName = /^(\d{2})-([A-Za-z]{3})-(\d{4})$/.exec(trimmed);
+  const namedMonth = monthName?.[2]
+    ? monthNumbers[monthName[2].toLowerCase()]
+    : undefined;
   const [year, month, day] = iso
     ? [iso[1], iso[2], iso[3]]
     : dayFirst
       ? [dayFirst[3], dayFirst[2], dayFirst[1]]
-      : [];
+      : monthName && namedMonth
+        ? [monthName[3], namedMonth, monthName[1]]
+        : [];
   if (!year || !month || !day) return undefined;
   const candidate = `${year}-${month}-${day}`;
   const parsed = new Date(`${candidate}T00:00:00Z`);
@@ -126,7 +167,8 @@ function isoDate(value?: string): string | undefined {
     : candidate;
 }
 
-const maskedKeys = /^(nin|number|vnin|identity_value|telephoneno|phone.*)$/i;
+const maskedKeys =
+  /^(nin|bvn|number|vnin|identity_value|telephoneno|phone.*)$/i;
 
 function maskValue(value: string): string {
   return value.length <= 4
@@ -166,10 +208,51 @@ function succeeded(body: PremblyResponse): boolean {
   return body.status === true && body.response_code === "00";
 }
 
-function ninRecord(body: PremblyResponse) {
-  if (body.nin_data) return body.nin_data;
-  if (body.data?.nin_data) return body.data.nin_data;
-  return body.data?.firstname || body.data?.surname ? body.data : undefined;
+/** The registered record, normalised across the NIN (snake) and BVN (camel) shapes. */
+interface RegisteredRecord {
+  number?: string | undefined;
+  firstName?: string | undefined;
+  middleName?: string | undefined;
+  lastName?: string | undefined;
+  birthdate?: string | undefined;
+  suspended?: boolean | undefined;
+}
+
+function ninRecord(body: PremblyResponse): RegisteredRecord | undefined {
+  const record =
+    body.nin_data ??
+    body.data?.nin_data ??
+    (body.data?.firstname || body.data?.surname ? body.data : undefined);
+  return record
+    ? {
+        number: record.nin,
+        firstName: record.firstname,
+        middleName: record.middlename,
+        lastName: record.surname,
+        birthdate: record.birthdate,
+        suspended: record.nin_suspension_status,
+      }
+    : undefined;
+}
+
+function bvnRecord(body: PremblyResponse): RegisteredRecord | undefined {
+  const record = body.data;
+  return record?.firstName || record?.lastName
+    ? {
+        number: record.bvn ?? record.number,
+        firstName: record.firstName,
+        middleName: record.middleName,
+        lastName: record.lastName,
+        birthdate: record.dateOfBirth,
+      }
+    : undefined;
+}
+
+function registeredRecord(
+  identityType: KycIdentityType,
+  body: PremblyResponse,
+): RegisteredRecord | undefined {
+  return identityType === "BVN" ? bvnRecord(body) : ninRecord(body);
 }
 
 function faceData(body: PremblyResponse) {
@@ -192,34 +275,33 @@ export class PremblyProvider
     identityValue: string;
   }): Promise<KycProviderResult> {
     const fallbackReference = `prembly-request:${input.verificationId}`;
-    if (input.identityType !== "NIN")
-      return this.result(
-        "FAILED",
-        fallbackReference,
-        "IDENTITY_TYPE_UNSUPPORTED",
-        { status: "failed" },
-      );
-    const call = await this.call(paths.ninBasic, input.verificationId, {
-      number: input.identityValue,
-    });
+    const call = await this.call(
+      input.identityType === "BVN" ? paths.bvnBasic : paths.ninBasic,
+      input.verificationId,
+      { number: input.identityValue },
+    );
     if (call.kind === "UNKNOWN") return this.pending(fallbackReference, call);
     const { body } = call;
     const reference = this.reference(body, fallbackReference);
     const rejected = this.rejection(call, reference);
     if (rejected) return rejected;
-    const record = ninRecord(body);
-    if (!body.is_sandbox && record?.nin && record.nin !== input.identityValue)
+    const record = registeredRecord(input.identityType, body);
+    if (
+      !body.is_sandbox &&
+      record?.number &&
+      record.number !== input.identityValue
+    )
       return this.result("MANUAL_REVIEW", reference, "IDENTITY_MISMATCH", {
         status: "manual_review",
       });
-    if (record?.nin_suspension_status === true)
+    if (record?.suspended === true)
       return this.result("MANUAL_REVIEW", reference, "NIN_SUSPENDED", {
         status: "manual_review",
       });
     const attributes: VerifiedIdentityAttributes = {};
-    const firstName = displayName(record?.firstname);
-    const middleName = displayName(record?.middlename);
-    const lastName = displayName(record?.surname);
+    const firstName = displayName(record?.firstName);
+    const middleName = displayName(record?.middleName);
+    const lastName = displayName(record?.lastName);
     const dateOfBirth = isoDate(record?.birthdate);
     if (firstName) attributes.firstName = firstName;
     if (middleName) attributes.middleName = middleName;
@@ -245,7 +327,7 @@ export class PremblyProvider
     evidence: FaceEvidence;
   }): Promise<KycProviderResult> {
     const fallbackReference = `prembly-biometric:${input.verificationId}`;
-    if (input.evidence.kind !== "SELFIE_IMAGE" || input.identityType !== "NIN")
+    if (input.evidence.kind !== "SELFIE_IMAGE")
       return unsupportedFaceEvidence(
         fallbackReference,
         this.options.configurationVersion,
@@ -279,18 +361,22 @@ export class PremblyProvider
         },
       );
 
-    const match = await this.call(paths.ninWithFace, input.verificationId, {
-      number: input.identityValue,
-      image,
-      face_confidence_threshold: this.options.faceMatchThreshold,
-    });
+    const match = await this.call(
+      input.identityType === "BVN" ? paths.bvnWithFace : paths.ninWithFace,
+      input.verificationId,
+      {
+        number: input.identityValue,
+        image,
+        face_confidence_threshold: this.options.faceMatchThreshold,
+      },
+    );
     if (match.kind === "UNKNOWN") return this.pending(fallbackReference, match);
     const reference = this.reference(match.body, fallbackReference);
     const matchRejected = this.rejection(match, reference);
     if (matchRejected?.outcome === "PENDING") return matchRejected;
-    const record = ninRecord(match.body);
+    const record = registeredRecord(input.identityType, match.body);
     const matchedRecord =
-      match.body.is_sandbox === true || record?.nin === input.identityValue;
+      match.body.is_sandbox === true || record?.number === input.identityValue;
     const faceMatched =
       !matchRejected && faceData(match.body)?.status === true && matchedRecord;
     return this.result(

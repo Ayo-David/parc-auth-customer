@@ -18,6 +18,7 @@ import type {
   KycProviderResult,
   VerifiedIdentityAttributes,
 } from "../providers/kyc-provider.js";
+import type { IdentityNumberCipher } from "../security/identity-number-cipher.js";
 
 export interface KycVerificationView {
   id: string;
@@ -81,6 +82,8 @@ export class KycService {
     private readonly providers: KycProviderResolver,
     private readonly idempotencySecret: string,
     private readonly evidenceKeys: KycEvidenceKeys,
+    /** Encrypts the verified BVN kept for opening the customer's Paystack account. */
+    private readonly identityNumbers?: IdentityNumberCipher,
   ) {}
 
   public async start(
@@ -206,6 +209,38 @@ export class KycService {
             ...this.signResult(providerResult),
             retainUntil: new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000),
           });
+        // Kept (encrypted) so Payment can open the customer's Paystack account
+        // without asking for the BVN again; never logged or returned to clients.
+        if (
+          providerResult.outcome === "VERIFIED" &&
+          input.identityType === "BVN" &&
+          this.identityNumbers
+        ) {
+          const encrypted = this.identityNumbers.encrypt(input.identityValue, {
+            tenantId: input.tenantId,
+            customerId: initial.customerId,
+            identityType: "BVN",
+          });
+          await transaction("customer_identity_numbers")
+            .insert({
+              tenant_id: input.tenantId,
+              customer_id: initial.customerId,
+              identity_type: "BVN",
+              ciphertext: encrypted.ciphertext,
+              iv: encrypted.iv,
+              auth_tag: encrypted.authTag,
+              key_id: encrypted.keyId,
+              verification_id: verificationId,
+            })
+            .onConflict(["tenant_id", "customer_id", "identity_type"])
+            .merge([
+              "ciphertext",
+              "iv",
+              "auth_tag",
+              "key_id",
+              "verification_id",
+            ]);
+        }
         await repository.updateProfile({
           tenantId: input.tenantId,
           customerId: initial.customerId,
@@ -438,7 +473,7 @@ export class KycService {
     );
   }
 
-  /** The NIN register is the source of truth for the customer's legal name. */
+  /** The BVN/NIN register is the source of truth for the customer's legal name. */
   private async applyRegisteredIdentity(
     transaction: Knex.Transaction,
     customerId: string,

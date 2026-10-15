@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { createServer } from "node:http";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config/env.js";
@@ -46,6 +47,7 @@ import { LendingEligibilityService } from "./services/lending-eligibility-servic
 import { ServiceTokenService } from "./services/service-token-service.js";
 import { ClientAssertionVerifier } from "./security/client-assertion-verifier.js";
 import { createParcAuth } from "./security/parc-service-auth.js";
+import { IdentityNumberCipher } from "./security/identity-number-cipher.js";
 import { scopeCatalogue } from "./security/scope-catalogue.js";
 
 const config = loadConfig();
@@ -131,6 +133,10 @@ const kycProviders = {
     debugLog: config.PREMBLY_DEBUG_LOG,
   }),
 };
+const identityNumbers = new IdentityNumberCipher(
+  config.KYC_IDENTITY_NUMBER_KEY_ID,
+  z.record(z.string()).parse(JSON.parse(config.KYC_IDENTITY_NUMBER_KEYS_JSON)),
+);
 const kycService = new KycService(
   database,
   new StaticKycProviderResolver(
@@ -144,6 +150,7 @@ const kycService = new KycService(
     resultSigningSecret: config.KYC_RESULT_SIGNING_SECRET,
     resultSigningKeyId: config.KYC_RESULT_SIGNING_KEY_ID,
   },
+  identityNumbers,
 );
 const notificationWorker = config.NOTIFICATION_WORKER_ENABLED
   ? new NotificationRabbitWorker(
@@ -260,6 +267,7 @@ const app = createApp({
     database,
     tenantAdmin,
     config.IDEMPOTENCY_HASH_SECRET,
+    identityNumbers,
   ),
   accessTokenVerifier: sessionService,
   authenticationService,

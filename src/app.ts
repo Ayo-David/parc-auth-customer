@@ -32,6 +32,7 @@ import { createCustomerExperienceRouter } from "./http/customer-experience-route
 import type { OnboardingService } from "./services/onboarding-service.js";
 import { createOnboardingRouter } from "./http/onboarding-router.js";
 import { createLendingEligibilityRouter } from "./http/lending-eligibility-router.js";
+import { createCustomerProviderProfileRouter } from "./http/customer-provider-profile-router.js";
 import type { LendingEligibilityService } from "./services/lending-eligibility-service.js";
 import type { AccessPolicy, ParcAuth } from "./security/parc-service-auth.js";
 import { createOAuthTokenRouter } from "./http/oauth-token-router.js";
@@ -54,6 +55,11 @@ export const internalAccessPolicies = {
   lendingEligibility: {
     scopes: ["auth.lending-eligibility.read"],
     actors: ["parc-lending"],
+  },
+  customerProviderProfile: {
+    scopes: ["auth.customer-provider-profile.read"],
+    kinds: ["service"],
+    actors: ["parc-payment"],
   },
 } satisfies Record<string, AccessPolicy>;
 
@@ -227,6 +233,13 @@ export function createApp({
         otpService,
         kycService,
         customerAuthentication(accessTokenVerifier),
+      ),
+    );
+  if (customerService)
+    app.use(
+      createCustomerProviderProfileRouter(
+        customerService,
+        access(internalAccessPolicies.customerProviderProfile),
       ),
     );
   if (lendingEligibilityService)

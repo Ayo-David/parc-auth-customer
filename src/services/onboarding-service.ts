@@ -6,6 +6,7 @@ import { ApiError } from "../http/api-error.js";
 import { ConsentRepository } from "../repositories/consent-repository.js";
 import { CredentialRepository } from "../repositories/credential-repository.js";
 import { CustomerRepository } from "../repositories/customer-repository.js";
+import { EventRepository } from "../repositories/event-repository.js";
 import { IdempotencyRepository } from "../repositories/idempotency-repository.js";
 import { UserRepository } from "../repositories/user-repository.js";
 import type { TenantAdminClient } from "./tenant-admin-client.js";
@@ -32,6 +33,40 @@ interface SessionRecord {
   expires_at: Date;
   completed_at: Date | null;
   updated_at: Date;
+}
+
+/**
+ * Outbox event Ledger consumes to provision the customer's NGN wallet
+ * account. Also used by scripts/backfill-onboarding-completed.ts.
+ */
+export async function publishOnboardingCompleted(
+  tx: Knex.Transaction,
+  input: { tenantId: string; customerId: string; correlationId: string },
+): Promise<void> {
+  const eventId = randomUUID();
+  await new EventRepository(tx).publish({
+    tenantId: input.tenantId,
+    eventId,
+    eventType: "customer.onboarding.completed.v1",
+    aggregateType: "customer",
+    aggregateId: input.customerId,
+    payload: {
+      event_id: eventId,
+      event_type: "customer.onboarding.completed.v1",
+      event_version: 1,
+      occurred_at: new Date().toISOString(),
+      producer: "parc-auth-customer",
+      tenant_id: input.tenantId,
+      aggregate_type: "customer",
+      aggregate_id: input.customerId,
+      aggregate_version: 1,
+      correlation_id: input.correlationId,
+      causation_id: null,
+      idempotency_key: `customer-onboarding-completed:${input.customerId}`,
+      data_classification: "INTERNAL",
+      payload: { customer_id: input.customerId },
+    },
+  });
 }
 
 export class OnboardingService {
@@ -469,10 +504,16 @@ export class OnboardingService {
     });
   }
 
+  /**
+   * Final onboarding step. Publishes `customer.onboarding.completed.v1` in the
+   * same transaction so Ledger provisions the customer's NGN wallet account,
+   * which the dashboard balance depends on.
+   */
   public completeBiometric(
     tenantId: string,
     userId: string,
     enrolled: boolean,
+    correlationId: string = randomUUID(),
   ): Promise<object> {
     return withTenantTransaction(this.database, tenantId, async (tx) => {
       const session = await this.session(tx, userId);
@@ -504,6 +545,11 @@ export class OnboardingService {
           completed_at: tx.fn.now(),
         })
         .returning("*")) as SessionRecord[];
+      await publishOnboardingCompleted(tx, {
+        tenantId,
+        customerId: session.customer_id,
+        correlationId,
+      });
       return this.view(updated ?? session);
     });
   }
