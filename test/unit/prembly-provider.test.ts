@@ -416,3 +416,58 @@ test("still rejects a different NIN record from the live API", async () => {
     resultCode: "IDENTITY_MISMATCH",
   });
 });
+
+test("debug logging prints each call with the NIN masked and images trimmed", async () => {
+  const log = jest.spyOn(console, "log").mockImplementation(() => undefined);
+  const fetchImplementation = jest.fn<typeof fetch>().mockResolvedValue(
+    json({
+      status: true,
+      response_code: "00",
+      data: {
+        nin,
+        firstname: "ADA",
+        surname: "OBI",
+        photo: "A".repeat(4096),
+      },
+    }),
+  );
+  await new PremblyProvider({
+    baseUrl: "https://prembly.invalid",
+    apiKey: "prembly-secret",
+    configurationVersion: "v1",
+    timeoutMs: 100,
+    faceMatchThreshold: 80,
+    livenessMinimumPercent: 90,
+    allowSandbox: false,
+    debugLog: true,
+    fetchImplementation,
+  }).verifyIdentity({
+    verificationId: "verification-1",
+    identityType: "NIN",
+    identityValue: nin,
+  });
+  const output = log.mock.calls.map((call) => String(call[0])).join("\n");
+  log.mockRestore();
+
+  expect(output).toContain("Prembly · NIN lookup");
+  expect(output).toContain("Prembly decision: VERIFIED · SUCCESS");
+  expect(output).toContain('"nin": "*******0001"');
+  expect(output).toContain("[base64, 4.0 KB]");
+  expect(output).not.toContain(nin);
+  expect(output).not.toContain("prembly-secret");
+});
+
+test("stays silent when debug logging is off", async () => {
+  const log = jest.spyOn(console, "log").mockImplementation(() => undefined);
+  await provider(
+    jest
+      .fn<typeof fetch>()
+      .mockResolvedValue(json({ status: true, response_code: "00" })),
+  ).verifyIdentity({
+    verificationId: "verification-1",
+    identityType: "NIN",
+    identityValue: nin,
+  });
+  expect(log).not.toHaveBeenCalled();
+  log.mockRestore();
+});

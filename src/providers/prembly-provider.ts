@@ -15,6 +15,12 @@ const paths = {
   ninWithFace: "/verification/nin_w_face",
 } as const;
 
+const callLabels: Record<string, string> = {
+  [paths.ninBasic]: "NIN lookup",
+  [paths.liveness]: "Liveness check",
+  [paths.ninWithFace]: "NIN face match",
+};
+
 const ninDataSchema = z
   .object({
     nin: z.string().optional(),
@@ -80,6 +86,11 @@ export interface PremblyProviderOptions {
    * Off outside development so a test key can never verify a real customer.
    */
   allowSandbox: boolean;
+  /**
+   * Development only: print every Prembly call to the console with the NIN
+   * masked and images trimmed. The config refuses it in production.
+   */
+  debugLog?: boolean;
   fetchImplementation?: typeof fetch;
 }
 
@@ -113,6 +124,42 @@ function isoDate(value?: string): string | undefined {
     parsed.toISOString().slice(0, 10) !== candidate
     ? undefined
     : candidate;
+}
+
+const maskedKeys = /^(nin|number|vnin|identity_value|telephoneno|phone.*)$/i;
+
+function maskValue(value: string): string {
+  return value.length <= 4
+    ? "****"
+    : `${"*".repeat(value.length - 4)}${value.slice(-4)}`;
+}
+
+/** Masks identifiers and swaps base64 images for their size so the log stays readable. */
+function debugSafe(value: unknown, key = ""): unknown {
+  if (typeof value === "string") {
+    if (maskedKeys.test(key)) return maskValue(value);
+    if (value.length > 200 && /^[A-Za-z0-9+/=\s]+$/.test(value.slice(0, 200)))
+      return `[base64, ${(value.length / 1024).toFixed(1)} KB]`;
+    return value;
+  }
+  if (typeof value === "number" && maskedKeys.test(key))
+    return maskValue(String(value));
+  if (Array.isArray(value)) return value.map((item) => debugSafe(item, key));
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entry]) => [
+        entryKey,
+        debugSafe(entry, entryKey),
+      ]),
+    );
+  return value;
+}
+
+function indent(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => `│   ${line}`)
+    .join("\n");
 }
 
 function succeeded(body: PremblyResponse): boolean {
@@ -263,6 +310,7 @@ export class PremblyProvider
     verificationId: string,
     body: Record<string, unknown>,
   ): Promise<PremblyCall> {
+    const startedAt = Date.now();
     try {
       const response = await this.fetchImplementation(
         `${this.options.baseUrl}${path}`,
@@ -279,9 +327,13 @@ export class PremblyProvider
           signal: AbortSignal.timeout(this.options.timeoutMs),
         },
       );
-      const parsed = responseSchema.safeParse(
-        await response.json().catch(() => ({})),
-      );
+      const raw: unknown = await response.json().catch(() => ({}));
+      this.debugCall(path, verificationId, body, {
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+        response: raw,
+      });
+      const parsed = responseSchema.safeParse(raw);
       if (
         parsed.success &&
         parsed.data.is_sandbox &&
@@ -293,9 +345,56 @@ export class PremblyProvider
         httpStatus: response.status,
         body: parsed.success ? parsed.data : {},
       };
-    } catch {
+    } catch (error) {
+      this.debugCall(path, verificationId, body, {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return { kind: "UNKNOWN", resultCode: "PROVIDER_OUTCOME_UNKNOWN" };
     }
+  }
+
+  private debugCall(
+    path: string,
+    verificationId: string,
+    request: Record<string, unknown>,
+    outcome:
+      | { httpStatus: number; durationMs: number; response: unknown }
+      | { durationMs: number; error: string },
+  ): void {
+    if (!this.options.debugLog) return;
+    const label = callLabels[path] ?? path;
+    const rule = "─".repeat(Math.max(4, 60 - label.length));
+    const lines = [
+      "",
+      `┌─ Prembly · ${label} ${rule}`,
+      `│ POST ${path}`,
+      `│ verification  ${verificationId}`,
+    ];
+    if ("error" in outcome) {
+      lines.push(
+        `│ ✖ request failed after ${String(outcome.durationMs)} ms: ${outcome.error}`,
+      );
+    } else {
+      const response = (outcome.response ?? {}) as Record<string, unknown>;
+      const field = (name: string) =>
+        response[name] === undefined ? "—" : JSON.stringify(response[name]);
+      const summary = [
+        `status ${field("status")}`,
+        `response_code ${field("response_code")}`,
+        `sandbox ${field("is_sandbox")}`,
+      ].join(" · ");
+      lines.push(
+        `│ HTTP ${String(outcome.httpStatus)} · ${String(outcome.durationMs)} ms`,
+        `│ ${summary}`,
+        "├─ request",
+        indent(JSON.stringify(debugSafe(request), null, 2)),
+        "├─ response",
+        indent(JSON.stringify(debugSafe(response), null, 2)),
+      );
+    }
+    lines.push(`└${"─".repeat(64 + 10)}`);
+    console.log(lines.join("\n"));
   }
 
   /**
@@ -356,6 +455,10 @@ export class PremblyProvider
     resultCode: string,
     safeResult: Record<string, unknown>,
   ): KycProviderResult {
+    if (this.options.debugLog)
+      console.log(
+        `  ↳ Prembly decision: ${outcome} · ${resultCode} · ref ${providerReference}\n`,
+      );
     return {
       outcome,
       providerReference,

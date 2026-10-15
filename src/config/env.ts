@@ -73,6 +73,10 @@ const environmentSchema = z
       .default("false")
       .transform((value) => value === "true"),
     PREMBLY_LIVENESS_MIN_PERCENT: z.coerce.number().min(0).max(100).default(90),
+    PREMBLY_DEBUG_LOG: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     VERIFYME_BASE_URL: baseUrl("https://vapi.verifyme.ng"),
     VERIFYME_API_KEY: z
       .string()
@@ -217,6 +221,11 @@ const environmentSchema = z
     ({ NODE_ENV, PREMBLY_ALLOW_SANDBOX }) =>
       NODE_ENV !== "production" || !PREMBLY_ALLOW_SANDBOX,
     { message: "Production must not accept Prembly sandbox responses" },
+  )
+  .refine(
+    ({ NODE_ENV, PREMBLY_DEBUG_LOG }) =>
+      NODE_ENV !== "production" || !PREMBLY_DEBUG_LOG,
+    { message: "Production must not log Prembly responses" },
   )
   .refine(
     ({ OUTBOX_PUBLISHER_ENABLED, OUTBOX_TENANT_IDS }) =>
