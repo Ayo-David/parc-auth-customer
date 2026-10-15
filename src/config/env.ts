@@ -8,6 +8,11 @@ const baseUrl = (fallback: string) =>
     .default(fallback)
     .transform((value) => value.replace(/\/+$/, ""));
 
+/** Development-only BVN encryption key; production refuses to start with it. */
+const DEVELOPMENT_IDENTITY_NUMBER_KEY =
+  "ZGV2ZWxvcG1lbnQtaWRlbnRpdHktbnVtYmVyLWtleSE=";
+const DEVELOPMENT_IDENTITY_NUMBER_KEY_ID = "development-v1";
+
 const environmentSchema = z
   .object({
     NODE_ENV: z
@@ -94,6 +99,20 @@ const environmentSchema = z
       .min(32)
       .default("development-kyc-signing-key-change-me"),
     KYC_RESULT_SIGNING_KEY_ID: z.string().min(1).default("development-v1"),
+    /**
+     * AES-256-GCM keys for stored BVNs, as {"<key id>":"<base64 32 bytes>"}.
+     * Keep retired keys listed so older rows still decrypt.
+     */
+    KYC_IDENTITY_NUMBER_KEYS_JSON: z
+      .string()
+      .min(2)
+      .default(
+        `{"${DEVELOPMENT_IDENTITY_NUMBER_KEY_ID}":"${DEVELOPMENT_IDENTITY_NUMBER_KEY}"}`,
+      ),
+    KYC_IDENTITY_NUMBER_KEY_ID: z
+      .string()
+      .min(1)
+      .default(DEVELOPMENT_IDENTITY_NUMBER_KEY_ID),
     NOTIFICATION_WORKER_ENABLED: z
       .enum(["true", "false"])
       .default("false")
@@ -248,6 +267,12 @@ const environmentSchema = z
       NODE_ENV !== "production" ||
       KYC_RESULT_SIGNING_SECRET !== "development-kyc-signing-key-change-me",
     { message: "Production requires KYC_RESULT_SIGNING_SECRET" },
+  )
+  .refine(
+    ({ NODE_ENV, KYC_IDENTITY_NUMBER_KEYS_JSON }) =>
+      NODE_ENV !== "production" ||
+      !KYC_IDENTITY_NUMBER_KEYS_JSON.includes(DEVELOPMENT_IDENTITY_NUMBER_KEY),
+    { message: "Production requires KYC_IDENTITY_NUMBER_KEYS_JSON" },
   )
   .refine(
     ({ NODE_ENV, NOTIFICATION_WORKER_ENABLED }) =>

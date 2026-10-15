@@ -24,6 +24,7 @@
     "migrate:runtime": "KNEX_MIGRATIONS_COMPILED=true node ./node_modules/knex/bin/cli.js --knexfile dist/knexfile.js migrate:latest",
     "migrate:status": "node --import tsx ./node_modules/knex/bin/cli.js --knexfile knexfile.ts migrate:status",
     "seed:pr01": "tsx scripts/seed-pr01.ts",
+    "backfill:onboarding-completed": "node --env-file=.env --import tsx scripts/backfill-onboarding-completed.ts",
     "start": "node dist/src/server.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
     "test:coverage": "NODE_OPTIONS=--experimental-vm-modules jest --coverage --runInBand",

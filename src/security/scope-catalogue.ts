@@ -28,6 +28,13 @@ export const scopeCatalogue: ScopeCatalogue = {
       delegated: {},
       platform: true,
     },
+    "auth.customer-provider-profile.read": {
+      audience: "parc-auth-customer",
+      description:
+        "Read a customer's legal name, email and phone to open a provider account (e.g. a Paystack dedicated virtual account) in their name.",
+      service: true,
+      delegated: {},
+    },
     "auth.lending-eligibility.read": {
       audience: "parc-auth-customer",
       description: "Read a customer's consented lending-eligibility evidence.",
@@ -400,6 +407,7 @@ export const scopeCatalogue: ScopeCatalogue = {
     },
     "parc-payment": {
       service: [
+        "auth.customer-provider-profile.read",
         "ledger.accounts.provision",
         "ledger.balances.read",
         "ledger.postings.write",

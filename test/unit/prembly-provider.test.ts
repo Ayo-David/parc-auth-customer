@@ -471,3 +471,106 @@ test("stays silent when debug logging is off", async () => {
   expect(log).not.toHaveBeenCalled();
   log.mockRestore();
 });
+
+const bvn = "22222222222";
+
+test("returns the registered name from a BVN, reading Prembly's camelCase record", async () => {
+  const fetchImplementation = jest.fn<typeof fetch>().mockResolvedValue(
+    json({
+      status: true,
+      response_code: "00",
+      verification: { reference: "prembly-bvn-1" },
+      data: {
+        firstName: "AYO",
+        middleName: "DAVID",
+        lastName: "AJAYI",
+        dateOfBirth: "01-Jan-2000",
+        phoneNumber: "08000000000",
+      },
+    }),
+  );
+  const result = await provider(fetchImplementation).verifyIdentity({
+    verificationId: "verification-id",
+    identityType: "BVN",
+    identityValue: bvn,
+  });
+  expect(result).toMatchObject({
+    outcome: "VERIFIED",
+    providerReference: "prembly-bvn-1",
+    resultCode: "SUCCESS",
+    identityAttributes: {
+      firstName: "Ayo",
+      middleName: "David",
+      lastName: "Ajayi",
+      dateOfBirth: "2000-01-01",
+    },
+  });
+  expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+    "https://prembly.invalid/verification/bvn_validation",
+  );
+  expect(requestBody(fetchImplementation, 0)).toEqual({ number: bvn });
+});
+
+test("sends a BVN whose returned record carries a different number to manual review", async () => {
+  const result = await provider(
+    jest.fn<typeof fetch>().mockResolvedValue(
+      json({
+        status: true,
+        response_code: "00",
+        data: { bvn: "33333333333", firstName: "AYO", lastName: "AJAYI" },
+      }),
+    ),
+  ).verifyIdentity({
+    verificationId: "verification-id",
+    identityType: "BVN",
+    identityValue: bvn,
+  });
+  expect(result).toMatchObject({
+    outcome: "MANUAL_REVIEW",
+    resultCode: "IDENTITY_MISMATCH",
+  });
+});
+
+test("matches a live selfie against the BVN photo", async () => {
+  const fetchImplementation = jest
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(
+      json({
+        status: true,
+        response_code: "00",
+        data: { confidence_in_percentage: 99 },
+      }),
+    )
+    .mockResolvedValueOnce(
+      json({
+        status: true,
+        response_code: "00",
+        verification: { reference: "prembly-bvn-face-1" },
+        data: {
+          bvn,
+          firstName: "AYO",
+          lastName: "AJAYI",
+          base64Image: "A".repeat(400),
+          face_data: { status: true, confidence: 95, threshold: 80 },
+        },
+      }),
+    );
+  const result = await provider(fetchImplementation).verifyFace({
+    verificationId: "verification-id",
+    identityType: "BVN",
+    identityValue: bvn,
+    evidence: { kind: "SELFIE_IMAGE", imageBase64: selfie },
+  });
+  expect(result).toMatchObject({
+    outcome: "VERIFIED",
+    resultCode: "LIVENESS_AND_FACE_MATCHED",
+  });
+  expect(fetchImplementation.mock.calls[1]?.[0]).toBe(
+    "https://prembly.invalid/verification/bvn_w_face",
+  );
+  expect(requestBody(fetchImplementation, 1)).toEqual({
+    number: bvn,
+    image: selfie,
+    face_confidence_threshold: 80,
+  });
+});

@@ -216,7 +216,9 @@ export function createOnboardingRouter(
         const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
-            identity_type: z.literal("NIN"),
+            // BVN is the onboarding identity (Tier 1); NIN stays accepted for
+            // customers who started onboarding before the switch.
+            identity_type: z.enum(["BVN", "NIN"]),
             identity_value: z.string().regex(/^[0-9]{11}$/),
             consent_id: z.string().uuid(),
           })
@@ -265,7 +267,9 @@ export function createOnboardingRouter(
         const subject = await resolve(request.authenticatedCustomer);
         const input = z
           .object({
-            identity_type: z.literal("NIN"),
+            // BVN is the onboarding identity (Tier 1); NIN stays accepted for
+            // customers who started onboarding before the switch.
+            identity_type: z.enum(["BVN", "NIN"]),
             identity_value: z.string().regex(/^[0-9]{11}$/),
             liveness_reference: z.string().min(1).max(255).optional(),
             selfie_image: selfieImage.optional(),
@@ -451,6 +455,11 @@ export function createOnboardingRouter(
             subject.tenantId,
             subject.userId,
             input.biometric_enrolled,
+            z
+              .string()
+              .uuid()
+              .catch(randomUUID())
+              .parse(request.header("x-correlation-id")),
           ),
         );
       } catch (error) {

@@ -86,6 +86,19 @@ integrationTest(
       false,
     )) as { status: string };
     expect(completed.status).toBe("COMPLETED");
+    const completedEvent = await database("auth_customer_outbox_events")
+      .where({
+        tenant_id: tenantId,
+        event_type: "customer.onboarding.completed.v1",
+      })
+      .first<{ aggregate_id: string; payload: { payload: object } }>();
+    expect(completedEvent.aggregate_id).toBe(session.customer_id);
+    expect(completedEvent.payload.payload).toEqual({
+      customer_id: session.customer_id,
+    });
+    await database("auth_customer_outbox_events")
+      .where({ tenant_id: tenantId })
+      .delete();
     await database("users").where({ id: session.user_id }).delete();
     await database("idempotency_keys").where({ tenant_id: tenantId }).delete();
   },
