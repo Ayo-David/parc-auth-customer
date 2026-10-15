@@ -128,6 +128,7 @@ const kycProviders = {
     faceMatchThreshold: config.PREMBLY_FACE_MATCH_THRESHOLD,
     livenessMinimumPercent: config.PREMBLY_LIVENESS_MIN_PERCENT,
     allowSandbox: config.PREMBLY_ALLOW_SANDBOX,
+    debugLog: config.PREMBLY_DEBUG_LOG,
   }),
 };
 const kycService = new KycService(
