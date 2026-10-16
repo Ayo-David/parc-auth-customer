@@ -47,7 +47,37 @@ const environmentSchema = z
       .min(32)
       .default("development-challenge-secret-change-me"),
     RATE_LIMIT_STORE: z.enum(["memory", "redis"]).default("memory"),
+    /** Standalone Redis; ignored when REDIS_SENTINELS is set. */
     REDIS_URL: z.string().url().default("redis://localhost:6379"),
+    /**
+     * Sentinel endpoints as `host[:port]`, comma separated. When set, the
+     * primary is discovered from Sentinel and rediscovered after failover.
+     */
+    REDIS_SENTINELS: z
+      .string()
+      .default("")
+      .transform((value) =>
+        value
+          .split(",")
+          .map((endpoint) => endpoint.trim())
+          .filter(Boolean)
+          .map((endpoint) => {
+            const [host = "", port = "6379"] = endpoint.split(":");
+            return { host, port: Number(port) };
+          }),
+      )
+      .pipe(
+        z.array(
+          z.object({
+            host: z.string().min(1),
+            port: z.number().int().min(1).max(65_535),
+          }),
+        ),
+      ),
+    REDIS_SENTINEL_MASTER_NAME: z.string().min(1).default("mymaster"),
+    REDIS_SENTINEL_PASSWORD: z.string().min(1).optional(),
+    /** Password for the primary and replicas in Sentinel mode. */
+    REDIS_PASSWORD: z.string().min(1).optional(),
     JWT_ISSUER: z.string().url().default("https://auth.parc.invalid"),
     JWT_ACTIVE_KID: z.string().min(1).default("development-ephemeral"),
     JWT_PRIVATE_KEY_BASE64: z.string().min(1).optional(),

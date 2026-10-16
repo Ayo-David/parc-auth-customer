@@ -6,9 +6,9 @@
  *   docker exec parc-auth-customer node dist/src/cli/read-otp.js <challenge_id>
  *   node --env-file=.env --import tsx src/cli/read-otp.ts <challenge_id>
  */
-import { createClient } from "redis";
 import { z } from "zod";
 import { loadConfig } from "../config/env.js";
+import { createRedis } from "../database/redis.js";
 import { RedisOtpSecretStore } from "../security/otp-secret-store.js";
 
 const challengeId = z.string().uuid().safeParse(process.argv[2]);
@@ -25,7 +25,7 @@ if (config.RATE_LIMIT_STORE !== "redis") {
   process.exit(1);
 }
 
-const redis = createClient({ url: config.REDIS_URL });
+const redis = createRedis(config);
 await redis.connect();
 try {
   const code = await new RedisOtpSecretStore(
