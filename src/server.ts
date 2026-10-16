@@ -7,10 +7,11 @@ import {
   closeDatabase,
   createDatabase,
 } from "./database/client.js";
+import { createRedis } from "./database/redis.js";
 import { createLogger } from "./utils/logger.js";
 import { CustomerService } from "./services/customer-service.js";
 import { HttpTenantAdminClient } from "./services/tenant-admin-client.js";
-import { createClient } from "redis";
+import { checkRedisWritable } from "./health/redis.js";
 import {
   MemoryRateLimiter,
   RedisRateLimiter,
@@ -54,12 +55,16 @@ const config = loadConfig();
 const logger = createLogger(config);
 const database = createDatabase(config);
 const redis =
-  config.RATE_LIMIT_STORE === "redis"
-    ? createClient({ url: config.REDIS_URL })
-    : undefined;
+  config.RATE_LIMIT_STORE === "redis" ? createRedis(config) : undefined;
 if (redis) {
   redis.on("error", (error) => {
     logger.error({ err: error }, "Redis error");
+  });
+  redis.on("reconnecting", (delayMs: number) => {
+    logger.warn({ delayMs }, "Redis reconnecting");
+  });
+  redis.on("ready", () => {
+    logger.info("Redis ready");
   });
   await redis.connect();
 }
@@ -256,9 +261,7 @@ const app = createApp({
       ? [
           {
             name: "redis",
-            check: async () => {
-              await redis.ping();
-            },
+            check: () => checkRedisWritable(redis),
           },
         ]
       : []),
@@ -343,7 +346,7 @@ function shutdown(signal: NodeJS.Signals): void {
       logger.error({ err: databaseError }, "Database close failed");
       process.exitCode = 1;
     });
-    if (redis?.isOpen)
+    if (redis && redis.status !== "end")
       void redis.quit().catch((redisError: unknown) => {
         logger.error({ err: redisError }, "Redis close failed");
         process.exitCode = 1;

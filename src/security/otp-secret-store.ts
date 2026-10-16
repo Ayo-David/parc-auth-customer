@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import type { RedisClientType } from "redis";
+import type { Redis } from "ioredis";
 
 export interface OtpSecretStore {
   put(challengeId: string, code: string, ttlSeconds: number): Promise<void>;
@@ -45,7 +45,7 @@ function decrypt(value: string, key: Buffer): string {
 export class RedisOtpSecretStore implements OtpSecretStore {
   private readonly key: Buffer;
   public constructor(
-    private readonly redis: RedisClientType,
+    private readonly redis: Redis,
     secret: string,
   ) {
     this.key = encryptionKey(secret);
@@ -55,9 +55,12 @@ export class RedisOtpSecretStore implements OtpSecretStore {
     code: string,
     ttlSeconds: number,
   ): Promise<void> {
-    await this.redis.set(`auth:otp:${challengeId}`, encrypt(code, this.key), {
-      EX: ttlSeconds,
-    });
+    await this.redis.set(
+      `auth:otp:${challengeId}`,
+      encrypt(code, this.key),
+      "EX",
+      ttlSeconds,
+    );
   }
   public async take(challengeId: string): Promise<string | undefined> {
     const value = await this.redis.get(`auth:otp:${challengeId}`);

@@ -1,11 +1,11 @@
-import type { RedisClientType } from "redis";
+import type { Redis } from "ioredis";
 
 export interface RateLimiter {
   consume(key: string, limit: number, windowSeconds: number): Promise<boolean>;
 }
 
 export class RedisRateLimiter implements RateLimiter {
-  public constructor(private readonly redis: RedisClientType) {}
+  public constructor(private readonly redis: Redis) {}
 
   public async consume(
     key: string,
