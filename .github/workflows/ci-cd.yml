@@ -231,6 +231,12 @@ jobs:
 
             # Preserve the last known-good image as the rollback target.
             if [ -f "$STATE_DIR/current_image.txt" ]; then
+              # The env file must still satisfy the rollback target (e.g. keep the previous SMS provider's credential).
+              echo "Checking $ENV_FILE against the rollback image's config..."
+              if ! check_config "$(cat "$STATE_DIR/current_image.txt")"; then
+                echo "$ENV_FILE no longer satisfies the rollback image; keep its credentials until it is no longer a rollback target." >&2
+                exit 1
+              fi
               cp "$STATE_DIR/current_image.txt" "$STATE_DIR/previous_image.txt"
             fi
 
