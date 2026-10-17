@@ -75,3 +75,28 @@ test("strips trailing slashes from provider base URLs", () => {
   expect(config.TERMII_BASE_URL).toBe("https://v4.api.termii.com");
   expect(config.PREMBLY_BASE_URL).toBe("https://api.prembly.com");
 });
+
+test("defaults SMS to Robase and requires only the selected SMS provider's key in production", () => {
+  const messages = (environment: NodeJS.ProcessEnv) => {
+    try {
+      loadConfig({ NODE_ENV: "production", ...environment });
+      return [];
+    } catch (error) {
+      return (error as { issues: { message: string }[] }).issues.map(
+        (issue) => issue.message,
+      );
+    }
+  };
+  expect(loadConfig({ NODE_ENV: "test" }).SMS_PROVIDER).toBe("ROBASE");
+  expect(messages({})).toContain("Production requires ROBASE_API_KEY");
+  expect(messages({})).not.toContain("Production requires TERMII_API_KEY");
+  expect(messages({ ROBASE_API_KEY: "robe_live" })).not.toContain(
+    "Production requires ROBASE_API_KEY",
+  );
+  const termii = messages({ SMS_PROVIDER: "TERMII" });
+  expect(termii).toContain("Production requires TERMII_API_KEY");
+  expect(termii).not.toContain("Production requires ROBASE_API_KEY");
+  expect(() =>
+    loadConfig({ NODE_ENV: "test", SMS_PROVIDER: "TWILIO" }),
+  ).toThrow();
+});

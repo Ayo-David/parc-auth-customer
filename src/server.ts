@@ -35,6 +35,7 @@ import { KycService } from "./services/kyc-service.js";
 import { applicationDefault, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
 import { BrevoEmailProvider } from "./providers/brevo-email-provider.js";
+import { RobaseSmsProvider } from "./providers/robase-sms-provider.js";
 import { TermiiSmsProvider } from "./providers/termii-sms-provider.js";
 import { FcmPushProvider } from "./providers/fcm-push-provider.js";
 import { StaticNotificationProviderRegistry } from "./providers/notification-provider.js";
@@ -170,13 +171,20 @@ const notificationWorker = config.NOTIFICATION_WORKER_ENABLED
             senderName: config.BREVO_SENDER_NAME,
             timeoutMs: config.NOTIFICATION_PROVIDER_TIMEOUT_MS,
           }),
-          SMS: new TermiiSmsProvider(config.TERMII_CONFIGURATION_VERSION, {
-            baseUrl: config.TERMII_BASE_URL,
-            apiKey: config.TERMII_API_KEY,
-            senderId: config.TERMII_SENDER_ID,
-            channel: config.TERMII_CHANNEL,
-            timeoutMs: config.NOTIFICATION_PROVIDER_TIMEOUT_MS,
-          }),
+          SMS:
+            config.SMS_PROVIDER === "TERMII"
+              ? new TermiiSmsProvider(config.TERMII_CONFIGURATION_VERSION, {
+                  baseUrl: config.TERMII_BASE_URL,
+                  apiKey: config.TERMII_API_KEY,
+                  senderId: config.TERMII_SENDER_ID,
+                  channel: config.TERMII_CHANNEL,
+                  timeoutMs: config.NOTIFICATION_PROVIDER_TIMEOUT_MS,
+                })
+              : new RobaseSmsProvider(config.ROBASE_CONFIGURATION_VERSION, {
+                  baseUrl: config.ROBASE_BASE_URL,
+                  apiKey: config.ROBASE_API_KEY,
+                  timeoutMs: config.NOTIFICATION_PROVIDER_TIMEOUT_MS,
+                }),
           PUSH: new FcmPushProvider(
             config.FCM_CONFIGURATION_VERSION,
             getMessaging(

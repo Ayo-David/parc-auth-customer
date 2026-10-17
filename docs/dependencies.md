@@ -6,7 +6,7 @@
 - Redis provides distributed login and PIN velocity limits in production. It is not authoritative for durable account lockout state.
 - VerifyMe is the first external NIN/BVN verification provider behind the provider-neutral `KycProvider` boundary. Only redacted normalized results cross into persistent workflow state.
 - RabbitMQ carries versioned notification requests through a durable quorum queue, manual acknowledgements, bounded delayed retries, and a dead-letter queue.
-- Brevo sends transactional email, Termii sends SMS, and Firebase Admin sends FCM push messages. Provider credentials use environment/secret-manager injection and are never persisted or logged.
+- Brevo sends transactional email, Robase sends SMS (Termii remains selectable through `SMS_PROVIDER`), and Firebase Admin sends FCM push messages. Provider credentials use environment/secret-manager injection and are never persisted or logged.
 
 ## Assumptions
 

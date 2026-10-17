@@ -146,12 +146,21 @@ jobs:
             # Last assignment wins, matching docker --env-file.
             env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
 
-            for key in DATABASE_URL TENANT_ADMIN_INTERNAL_URL SERVICE_CLIENT_KEYS_JSON IDEMPOTENCY_HASH_SECRET CHALLENGE_HASH_SECRET JWT_ISSUER JWT_ACTIVE_KID JWT_PRIVATE_KEY_BASE64 JWT_PUBLIC_KEYS_JSON TOKEN_HASH_SECRET VERIFYME_API_KEY KYC_IDENTIFIER_HASH_SECRET KYC_RESULT_SIGNING_SECRET RABBITMQ_URL OUTBOX_TENANT_IDS NOTIFICATION_TARGET_HASH_SECRET BREVO_API_KEY TERMII_API_KEY; do
+            for key in DATABASE_URL TENANT_ADMIN_INTERNAL_URL SERVICE_CLIENT_KEYS_JSON IDEMPOTENCY_HASH_SECRET CHALLENGE_HASH_SECRET JWT_ISSUER JWT_ACTIVE_KID JWT_PRIVATE_KEY_BASE64 JWT_PUBLIC_KEYS_JSON TOKEN_HASH_SECRET VERIFYME_API_KEY KYC_IDENTIFIER_HASH_SECRET KYC_RESULT_SIGNING_SECRET RABBITMQ_URL OUTBOX_TENANT_IDS NOTIFICATION_TARGET_HASH_SECRET BREVO_API_KEY; do
               if [ -z "$(env_value "$key")" ]; then
                 echo "$ENV_FILE must set $key." >&2
                 exit 1
               fi
             done
+            if [ "$(env_value SMS_PROVIDER)" = "TERMII" ]; then
+              SMS_KEY=TERMII_API_KEY
+            else
+              SMS_KEY=ROBASE_API_KEY
+            fi
+            if [ -z "$(env_value "$SMS_KEY")" ]; then
+              echo "$ENV_FILE must set $SMS_KEY for the selected SMS_PROVIDER." >&2
+              exit 1
+            fi
             if [ -z "$(env_value REDIS_URL)" ] && [ -z "$(env_value REDIS_SENTINELS)" ]; then
               echo "$ENV_FILE must set REDIS_SENTINELS or REDIS_URL." >&2
               exit 1
@@ -222,6 +231,12 @@ jobs:
 
             # Preserve the last known-good image as the rollback target.
             if [ -f "$STATE_DIR/current_image.txt" ]; then
+              # The env file must still satisfy the rollback target (e.g. keep the previous SMS provider's credential).
+              echo "Checking $ENV_FILE against the rollback image's config..."
+              if ! check_config "$(cat "$STATE_DIR/current_image.txt")"; then
+                echo "$ENV_FILE no longer satisfies the rollback image; keep its credentials until it is no longer a rollback target." >&2
+                exit 1
+              fi
               cp "$STATE_DIR/current_image.txt" "$STATE_DIR/previous_image.txt"
             fi
 
