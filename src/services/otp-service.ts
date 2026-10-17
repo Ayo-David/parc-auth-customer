@@ -114,7 +114,7 @@ export class OtpService {
           });
           storedChallengeId = challenge.id;
           await this.secrets.put(challenge.id, code, 5 * 60);
-          // TEMP: remove once Termii SMS delivery is approved.
+          // TEMP: remove once SMS provider delivery is approved.
           if (input.purpose === "PHONE_VERIFICATION")
             console.log(
               `[TEMP OTP] phone=***${destination.slice(-4)} challenge_id=${challenge.id} code=${code}`,

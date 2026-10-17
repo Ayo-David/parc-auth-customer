@@ -1,6 +1,6 @@
 # Notification worker
 
-Set `NOTIFICATION_WORKER_ENABLED=true` only when RabbitMQ, Brevo, Termii, and Firebase credentials are configured. The worker declares `parc.auth-customer.notifications.v1`, its retry queue, and `parc.auth-customer.notifications.v1.dlq` as durable quorum queues.
+Set `NOTIFICATION_WORKER_ENABLED=true` only when RabbitMQ, Brevo, Firebase, and the selected SMS provider's credentials (`SMS_PROVIDER`: Robase by default, or Termii) are configured. The worker declares `parc.auth-customer.notifications.v1`, its retry queue, and `parc.auth-customer.notifications.v1.dlq` as durable quorum queues.
 
 Monitor inbox rows in `FAILED` and `DEAD_LETTER`, retry age, provider failure codes, and retry-queue depth. Replay a dead-letter only after recording remediation; preserve the original `event_id`. Never copy message bodies, OTPs, destinations, tokens, or provider credentials into tickets or logs.
 

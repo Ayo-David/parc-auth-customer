@@ -4,6 +4,7 @@
  *
  *   node --env-file=.env --import tsx scripts/provider-smoke.ts prembly-nin <nin>
  *   node --env-file=.env --import tsx scripts/provider-smoke.ts prembly-face <nin> <selfie.jpg>
+ *   node --env-file=.env --import tsx scripts/provider-smoke.ts robase <+234...>
  *   node --env-file=.env --import tsx scripts/provider-smoke.ts termii <+234...>
  *   node --env-file=.env --import tsx scripts/provider-smoke.ts prembly-nin-shape <nin>
  *
@@ -15,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { loadConfig } from "../src/config/env.js";
 import { PremblyProvider } from "../src/providers/prembly-provider.js";
+import { RobaseSmsProvider } from "../src/providers/robase-sms-provider.js";
 import { TermiiSmsProvider } from "../src/providers/termii-sms-provider.js";
 
 // Smoke tests only need provider settings, not a bootable production config.
@@ -110,6 +112,24 @@ if (command === "prembly-nin-shape") {
     providerReference: result.providerReference,
     ...result.safeResult,
   });
+} else if (command === "robase") {
+  const destination = z
+    .string()
+    .regex(/^\+234[789][01][0-9]{8}$/)
+    .parse(first);
+  const result = await new RobaseSmsProvider(
+    config.ROBASE_CONFIGURATION_VERSION,
+    {
+      baseUrl: config.ROBASE_BASE_URL,
+      apiKey: config.ROBASE_API_KEY,
+      timeoutMs: config.NOTIFICATION_PROVIDER_TIMEOUT_MS,
+    },
+  ).send({
+    notificationId: randomUUID(),
+    destination,
+    body: "Parc test message: your SMS delivery is working.",
+  });
+  console.log(result);
 } else if (command === "termii") {
   const destination = z
     .string()
@@ -132,7 +152,7 @@ if (command === "prembly-nin-shape") {
   console.log(result);
 } else {
   console.error(
-    "Usage: provider-smoke.ts prembly-nin <nin> | prembly-face <nin> <selfie.jpg> | termii <+234...>",
+    "Usage: provider-smoke.ts prembly-nin <nin> | prembly-face <nin> <selfie.jpg> | robase <+234...> | termii <+234...>",
   );
   process.exitCode = 1;
 }

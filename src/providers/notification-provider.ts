@@ -16,7 +16,7 @@ export interface NotificationProviderResult {
 }
 
 export interface NotificationProvider {
-  readonly name: "BREVO" | "TERMII" | "FCM";
+  readonly name: "BREVO" | "ROBASE" | "TERMII" | "FCM";
   readonly configurationVersion: string;
   send(message: NotificationMessage): Promise<NotificationProviderResult>;
 }

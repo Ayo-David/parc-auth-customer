@@ -193,6 +193,14 @@ const environmentSchema = z
     BREVO_SENDER_EMAIL: z.string().email().default("no-reply@parc.invalid"),
     BREVO_SENDER_NAME: z.string().min(1).default("Parc"),
     BREVO_CONFIGURATION_VERSION: z.string().min(1).default("development-v1"),
+    /** Robase is the active SMS provider; Termii stays available as an alternative. */
+    SMS_PROVIDER: z.enum(["ROBASE", "TERMII"]).default("ROBASE"),
+    ROBASE_BASE_URL: baseUrl("https://api.robase.dev"),
+    ROBASE_API_KEY: z
+      .string()
+      .min(1)
+      .default("development-robase-key-change-me"),
+    ROBASE_CONFIGURATION_VERSION: z.string().min(1).default("development-v1"),
     TERMII_BASE_URL: baseUrl("https://api.ng.termii.com"),
     TERMII_API_KEY: z
       .string()
@@ -323,8 +331,16 @@ const environmentSchema = z
     { message: "Production requires BREVO_API_KEY" },
   )
   .refine(
-    ({ NODE_ENV, TERMII_API_KEY }) =>
+    ({ NODE_ENV, SMS_PROVIDER, ROBASE_API_KEY }) =>
       NODE_ENV !== "production" ||
+      SMS_PROVIDER !== "ROBASE" ||
+      ROBASE_API_KEY !== "development-robase-key-change-me",
+    { message: "Production requires ROBASE_API_KEY" },
+  )
+  .refine(
+    ({ NODE_ENV, SMS_PROVIDER, TERMII_API_KEY }) =>
+      NODE_ENV !== "production" ||
+      SMS_PROVIDER !== "TERMII" ||
       TERMII_API_KEY !== "development-termii-key-change-me",
     { message: "Production requires TERMII_API_KEY" },
   );
